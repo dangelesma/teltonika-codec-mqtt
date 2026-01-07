@@ -76,6 +76,14 @@ export class UdpServerManager extends EventEmitter {
 				}
 				
 				let deviceData = listenForDevice(data);
+				
+				// Handle parsing errors (invalid data from health checks, scanners, etc.)
+				if (deviceData.Error) {
+					deviceManager.log('debug', 'TCP', `Invalid data from ${clientIp}: ${deviceData.Error}`);
+					sock.destroy();
+					return;
+				}
+				
 				if (deviceData.Content == undefined && deviceData.Imei != undefined) {
 					// Security: Validate IMEI
 					const imeiValidation = securityManager.validateImei(deviceData.Imei);
