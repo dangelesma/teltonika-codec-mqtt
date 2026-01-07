@@ -820,7 +820,8 @@ export class WebApiServer {
   </div>
 
   <script>
-    const wsUrl = 'ws://' + window.location.host;
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = wsProtocol + '//' + window.location.host;
     let ws;
     let devices = {};
     let selectedImei = null;
