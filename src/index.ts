@@ -59,6 +59,36 @@ var opts = {
 const webApi = new WebApiServer(opts.webApi);
 webApi.start();
 
+// Track global MQTT status
+let mqttConnectedCount = 0;
+
+// Set MQTT config callback for dynamic reconnection
+webApi.setMqttConfigCallback(async (newConfig) => {
+  deviceManager.log('info', 'Main', 'MQTT config updated from UI, reconnecting all clients...');
+  
+  // Update opts with new config
+  opts.mqttOptions = {
+    host: newConfig.host,
+    port: newConfig.port,
+    protocol: newConfig.protocol,
+    username: newConfig.username,
+    password: newConfig.password,
+    rejectUnauthorized: newConfig.rejectUnauthorized
+  };
+  opts.orOpts.realm = newConfig.realm;
+  opts.orOpts.teltonika_keyword = newConfig.keyword;
+  
+  // Reconnect all existing clients
+  for (const imei of Object.keys(clients)) {
+    if (clients[imei]) {
+      clients[imei].client.end(true);
+      // Re-connection will happen automatically when device sends new data
+    }
+  }
+  
+  return true;
+});
+
 deviceManager.log('info', 'Main', 'Starting Teltonika Codec Server');
 deviceManager.log('info', 'Main', `TCP Port: ${opts.udp_options.port}`);
 deviceManager.log('info', 'Main', `MQTT Broker: ${opts.mqttOptions.protocol}://${opts.mqttOptions.host}:${opts.mqttOptions.port}`);
@@ -94,6 +124,7 @@ server.on("message", (imei: string, uuid: string, content: AVL_Data) => {
     dataTopic(opts.orOpts, uuid, imei),
     JSON.stringify(mqttMsg)
   );
+  webApi.incrementMqttMessages();
 });
 
 // Handle command responses (Codec 12)
@@ -113,6 +144,7 @@ server.on("commandResponse", (imei: string, uuid: string, response: string) => {
       dataTopic(opts.orOpts, uuid, imei),
       JSON.stringify(responseMsg)
     );
+    webApi.incrementMqttMessages();
   }
 });
 
@@ -127,6 +159,14 @@ server.on("connected", (imei: string, uuid: string) => {
   
   client.on('connect', () => {
     deviceManager.log('info', 'MQTT', `Connected for device ${imei}`);
+    mqttConnectedCount++;
+    
+    // Update WebAPI with MQTT status
+    webApi.updateMqttStatus({
+      connected: true,
+      broker: `${opts.mqttOptions.protocol}://${opts.mqttOptions.host}:${opts.mqttOptions.port}`,
+      lastConnected: new Date()
+    });
     
     // Subscribe to command topic for this device
     const cmdTopic = commandTopic(opts.orOpts, uuid, imei);
@@ -170,6 +210,7 @@ server.on("connected", (imei: string, uuid: string) => {
               }
             };
             client.publish(dataTopic(opts.orOpts, uuid, imei), JSON.stringify(errorMsg));
+            webApi.incrementMqttMessages();
           }
         } catch (error) {
           deviceManager.log('error', 'Codec12', `Error sending command to ${imei}`, error);
@@ -180,6 +221,18 @@ server.on("connected", (imei: string, uuid: string) => {
   
   client.on('error', (err) => {
     deviceManager.log('error', 'MQTT', `Error for device ${imei}`, err);
+    webApi.updateMqttStatus({
+      lastError: err.message
+    });
+  });
+  
+  client.on('close', () => {
+    mqttConnectedCount = Math.max(0, mqttConnectedCount - 1);
+    if (mqttConnectedCount === 0) {
+      webApi.updateMqttStatus({
+        connected: false
+      });
+    }
   });
   
   clients[imei] = { client: client, uuid: uuid };
@@ -192,6 +245,13 @@ server.on("disconnected", (imei: string) => {
   if (clients[imei]) {
     clients[imei].client.end();
     delete clients[imei];
+    mqttConnectedCount = Math.max(0, mqttConnectedCount - 1);
+    
+    if (mqttConnectedCount === 0) {
+      webApi.updateMqttStatus({
+        connected: false
+      });
+    }
   }
 });
 
