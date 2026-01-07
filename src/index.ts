@@ -41,7 +41,10 @@ var opts = {
   mqttOptions: {
 	host: process.env.mqttOptions__host || 'localhost',
 	port: parseInt(process.env.mqttOptions__port || '1883'),
-    protocol: process.env.mqttOptions__protocol || 'mqtt'
+    protocol: process.env.mqttOptions__protocol || 'mqtt',
+    username: process.env.mqttOptions__username || undefined,
+    password: process.env.mqttOptions__password || undefined,
+    rejectUnauthorized: process.env.mqttOptions__rejectUnauthorized !== 'false'
   },
   udp_options: {
 	port: parseInt(process.env.udpServerOptions__port || '8833')
@@ -58,7 +61,10 @@ webApi.start();
 
 deviceManager.log('info', 'Main', 'Starting Teltonika Codec Server');
 deviceManager.log('info', 'Main', `TCP Port: ${opts.udp_options.port}`);
-deviceManager.log('info', 'Main', `MQTT Broker: ${opts.mqttOptions.host}:${opts.mqttOptions.port}`);
+deviceManager.log('info', 'Main', `MQTT Broker: ${opts.mqttOptions.protocol}://${opts.mqttOptions.host}:${opts.mqttOptions.port}`);
+if (opts.mqttOptions.username) {
+  deviceManager.log('info', 'Main', `MQTT Auth: ${opts.mqttOptions.username}`);
+}
 
 const server = new UdpServerManager(opts.udp_options);
 

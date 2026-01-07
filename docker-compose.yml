@@ -15,6 +15,9 @@ services:
       - mqttOptions__host=${mqttOptions__host:-localhost}
       - mqttOptions__port=${mqttOptions__port:-1883}
       - mqttOptions__protocol=${mqttOptions__protocol:-mqtt}
+      - mqttOptions__username=${mqttOptions__username:-}
+      - mqttOptions__password=${mqttOptions__password:-}
+      - mqttOptions__rejectUnauthorized=${mqttOptions__rejectUnauthorized:-true}
       - orOpts__commandTopic=${orOpts__commandTopic:-commands}
       - orOpts__dataTopic=${orOpts__dataTopic:-data}
       - orOpts__realm=${orOpts__realm:-master}
