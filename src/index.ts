@@ -9,6 +9,8 @@ import { readFileSync } from "fs";
 import { IClientOptions, IConnackPacket, MqttClient, connect } from "mqtt";
 import moment = require("moment");
 import { commandManager } from "./CommandManager";
+import { deviceManager } from "./DeviceManager";
+import { WebApiServer } from "./WebApiServer";
 // import dotenv
 import * as dotenv from 'dotenv';
 let out = dotenv.config({ path: process.cwd()+'/.env' });
@@ -31,33 +33,57 @@ var clients: { [imei: string]: { client: MqttClient; uuid: string } } = {};
 
 var opts = {
   orOpts: {
-	realm: process.env.orOpts__realm!,
-	teltonika_keyword: process.env.orOpts__teltonika_keyword!,
-	dataTopic: process.env.orOpts__dataTopic!,
-	commandTopic: process.env.orOpts__commandTopic!,
+	realm: process.env.orOpts__realm || 'master',
+	teltonika_keyword: process.env.orOpts__teltonika_keyword || 'teltonika',
+	dataTopic: process.env.orOpts__dataTopic || 'data',
+	commandTopic: process.env.orOpts__commandTopic || 'commands',
   } as orOptions,
   mqttOptions: {
-	host: process.env.mqttOptions__host!,
-	port: parseInt(process.env.mqttOptions__port!),
-    protocol: process.env.mqttOptions__protocol!
+	host: process.env.mqttOptions__host || 'localhost',
+	port: parseInt(process.env.mqttOptions__port || '1883'),
+    protocol: process.env.mqttOptions__protocol || 'mqtt'
   },
   udp_options: {
-	port: parseInt(process.env.udpServerOptions__port!)
+	port: parseInt(process.env.udpServerOptions__port || '8833')
+  },
+  webApi: {
+    port: parseInt(process.env.WEB_API_PORT || '3000'),
+    host: process.env.WEB_API_HOST || '0.0.0.0'
   }
 };
 
-if (typeof opts.udp_options.port !== 'number') throw new Error("UDP port not defined, check env file");
+// Start Web API Server
+const webApi = new WebApiServer(opts.webApi);
+webApi.start();
+
+deviceManager.log('info', 'Main', 'Starting Teltonika Codec Server');
+deviceManager.log('info', 'Main', `TCP Port: ${opts.udp_options.port}`);
+deviceManager.log('info', 'Main', `MQTT Broker: ${opts.mqttOptions.host}:${opts.mqttOptions.port}`);
 
 const server = new UdpServerManager(opts.udp_options);
 
 // Handle AVL data messages
 server.on("message", (imei: string, uuid: string, content: AVL_Data) => {
-  console.log(`${imei}\t${content.Timestamp.toDateString()}\t${content.IOelement.ElementCount}`);
+  deviceManager.log('debug', 'AVL', `Data from ${imei}: ${content.IOelement.ElementCount} elements`);
+  
+  // Update device manager with position
+  deviceManager.updatePosition(imei, {
+    lat: content.GPSelement.Latitude,
+    lng: content.GPSelement.Longitude,
+    altitude: content.GPSelement.Altitude,
+    speed: content.GPSelement.Speed,
+    angle: content.GPSelement.Angle,
+    satellites: content.GPSelement.Satellites,
+    timestamp: content.Timestamp
+  });
+  
   var mqttMsg = processAvlData(content);
-  if(!clients[imei].client.connected) {
-    console.log(`Error connecting to MQTT broker. Message: ${process.env.mqttOptions__host!}:${process.env.mqttOptions__port!}\t\t${JSON.stringify(mqttMsg)}`)
-    return
+  
+  if (!clients[imei] || !clients[imei].client.connected) {
+    deviceManager.log('warn', 'MQTT', `Not connected to broker for ${imei}`);
+    return;
   }
+  
   clients[imei].client.publish(
     dataTopic(opts.orOpts, uuid, imei),
     JSON.stringify(mqttMsg)
@@ -66,7 +92,8 @@ server.on("message", (imei: string, uuid: string, content: AVL_Data) => {
 
 // Handle command responses (Codec 12)
 server.on("commandResponse", (imei: string, uuid: string, response: string) => {
-  console.log(`[Codec12] Command response from ${imei}: ${response}`);
+  deviceManager.log('info', 'Codec12', `Response from ${imei}: ${response}`);
+  
   if (clients[imei] && clients[imei].client.connected) {
     const responseMsg = {
       state: {
@@ -80,27 +107,28 @@ server.on("commandResponse", (imei: string, uuid: string, response: string) => {
       dataTopic(opts.orOpts, uuid, imei),
       JSON.stringify(responseMsg)
     );
-    console.log(`[Codec12] Published response to ${dataTopic(opts.orOpts, uuid, imei)}`);
   }
 });
 
 // Handle device connection
 server.on("connected", (imei: string, uuid: string) => {
-  console.log(`CONNECT: Device with IMEI ${imei} connected`);
+  deviceManager.log('info', 'Device', `Connected: ${imei}`);
+  deviceManager.registerDevice(imei, uuid);
+  
   const clientOptions: IClientOptions = opts.mqttOptions as IClientOptions;
   clientOptions["clientId"] = `teltonika_${imei}_${Date.now()}`;
   const client: MqttClient = connect(clientOptions as IClientOptions);
   
   client.on('connect', () => {
-    console.log(`[MQTT] Connected for device ${imei}`);
+    deviceManager.log('info', 'MQTT', `Connected for device ${imei}`);
     
     // Subscribe to command topic for this device
     const cmdTopic = commandTopic(opts.orOpts, uuid, imei);
     client.subscribe(cmdTopic, (err) => {
       if (err) {
-        console.error(`[MQTT] Error subscribing to ${cmdTopic}:`, err);
+        deviceManager.log('error', 'MQTT', `Error subscribing to ${cmdTopic}`, err);
       } else {
-        console.log(`[MQTT] Subscribed to command topic: ${cmdTopic}`);
+        deviceManager.log('info', 'MQTT', `Subscribed to: ${cmdTopic}`);
       }
     });
     
@@ -114,7 +142,7 @@ server.on("connected", (imei: string, uuid: string) => {
     
     if (topic === cmdTopic) {
       const command = message.toString().trim();
-      console.log(`[MQTT] Received command for ${imei}: "${command}"`);
+      deviceManager.log('info', 'MQTT', `Command for ${imei}: "${command}"`);
       
       if (command && command.length > 0) {
         try {
@@ -122,9 +150,9 @@ server.on("connected", (imei: string, uuid: string) => {
           const response = await commandManager.sendCommand(imei, command);
           
           if (response.success) {
-            console.log(`[Codec12] Command successful for ${imei}: ${response.response}`);
+            deviceManager.log('info', 'Codec12', `Command success for ${imei}: ${response.response}`);
           } else {
-            console.error(`[Codec12] Command failed for ${imei}: ${response.error}`);
+            deviceManager.log('error', 'Codec12', `Command failed for ${imei}: ${response.error}`);
             // Publish error to data topic
             const errorMsg = {
               state: {
@@ -138,21 +166,23 @@ server.on("connected", (imei: string, uuid: string) => {
             client.publish(dataTopic(opts.orOpts, uuid, imei), JSON.stringify(errorMsg));
           }
         } catch (error) {
-          console.error(`[Codec12] Error sending command to ${imei}:`, error);
+          deviceManager.log('error', 'Codec12', `Error sending command to ${imei}`, error);
         }
       }
     }
   });
   
   client.on('error', (err) => {
-    console.error(`[MQTT] Error for device ${imei}:`, err);
+    deviceManager.log('error', 'MQTT', `Error for device ${imei}`, err);
   });
   
   clients[imei] = { client: client, uuid: uuid };
 });
 
 server.on("disconnected", (imei: string) => {
-  console.log(`DISCONNECT: Device with IMEI ${imei} disconnected`);
+  deviceManager.log('info', 'Device', `Disconnected: ${imei}`);
+  deviceManager.unregisterDevice(imei);
+  
   if (clients[imei]) {
     clients[imei].client.end();
     delete clients[imei];

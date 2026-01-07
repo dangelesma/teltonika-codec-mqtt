@@ -7,6 +7,9 @@ This TypeScript project converts Teltonika device TCP connections (Codec 8/8E) t
 - ✅ **Codec 8/8E Support**: Receive telemetry data from Teltonika devices
 - ✅ **Codec 12 Commands**: Send GPRS commands to devices via MQTT
 - ✅ **MQTT Integration**: Publish data and receive commands via MQTT broker
+- ✅ **Web Dashboard**: Real-time web interface for device management
+- ✅ **Multi-Device Support**: Track and manage multiple devices simultaneously
+- ✅ **Security Features**: API authentication, IMEI whitelist, rate limiting, IP blocking
 - ✅ **Docker Ready**: Deploy with Docker Compose or Dokploy
 - ✅ **OpenRemote Compatible**: Works with OpenRemote IoT platform
 
@@ -29,6 +32,27 @@ cp .env.example .env
 docker-compose up -d
 ```
 
+4. Open web dashboard: `http://localhost:3000`
+
+## Web Dashboard
+
+Access the web dashboard at `http://your-server:3000` to:
+
+- 📱 View all connected devices in real-time
+- 📍 Monitor device positions and telemetry
+- 💬 Send commands to devices directly
+- 📋 View system logs
+- 🔒 Configure security settings
+
+### Security Settings (Web UI)
+
+All security features can be configured from the web interface:
+
+- **API Key Authentication**: Protect API endpoints
+- **IMEI Whitelist**: Only allow specific devices
+- **Rate Limiting**: Prevent abuse
+- **IP Whitelist/Blocking**: Control access by IP
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -41,6 +65,59 @@ docker-compose up -d
 | `orOpts__dataTopic` | data | Data topic suffix |
 | `orOpts__commandTopic` | commands | Command topic suffix |
 | `udpServerOptions__port` | 8833 | TCP port for device connections |
+| `webApiPort` | 3000 | Web dashboard/API port |
+
+### Security Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SECURITY_API_KEY_ENABLED` | false | Enable API key authentication |
+| `SECURITY_API_KEY` | (auto-generated) | API key for protected endpoints |
+| `SECURITY_IMEI_WHITELIST_ENABLED` | false | Enable IMEI whitelist |
+| `SECURITY_IMEI_WHITELIST` | "" | Comma-separated allowed IMEIs |
+| `SECURITY_RATE_LIMIT_ENABLED` | true | Enable rate limiting |
+| `SECURITY_RATE_LIMIT_WINDOW` | 60000 | Rate limit window (ms) |
+| `SECURITY_RATE_LIMIT_MAX_REQUESTS` | 100 | Max requests per window |
+| `SECURITY_IP_WHITELIST_ENABLED` | false | Enable IP whitelist |
+| `SECURITY_IP_WHITELIST` | "" | Comma-separated allowed IPs |
+| `SECURITY_MAX_DEVICES_PER_IP` | 5 | Max devices per IP address |
+| `SECURITY_MAX_CONNECTION_ATTEMPTS` | 10 | Max connection attempts before block |
+
+## REST API
+
+### Public Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/health` | Health check |
+| GET | `/api/stats` | Server statistics |
+
+### Protected Endpoints (require API key)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/devices` | List all devices |
+| GET | `/api/devices/:imei` | Get device details |
+| POST | `/api/devices/:imei/command` | Send command to device |
+| GET | `/api/logs` | Get system logs |
+| GET | `/api/security` | Get security status |
+| GET | `/api/security/config` | Get security configuration |
+| PUT | `/api/security/config` | Update security configuration |
+| GET | `/api/security/whitelist` | Get IMEI whitelist |
+| POST | `/api/security/whitelist` | Add IMEI to whitelist |
+| DELETE | `/api/security/whitelist/:imei` | Remove IMEI from whitelist |
+| GET | `/api/security/blocked` | Get blocked IPs |
+| POST | `/api/security/block` | Block an IP |
+| DELETE | `/api/security/block/:ip` | Unblock an IP |
+
+### API Authentication
+
+Include API key in requests:
+```bash
+curl -H "X-API-Key: your-api-key" http://localhost:3000/api/devices
+# Or
+curl -H "Authorization: Bearer your-api-key" http://localhost:3000/api/devices
+```
 
 ## MQTT Topics
 

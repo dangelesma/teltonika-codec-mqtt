@@ -5,6 +5,8 @@ import { AVL_Data, Data, GPRS, ProtocolParser } from 'complete-teltonika-parser'
 import EventEmitter = require('events');
 import { commandManager } from './CommandManager';
 import { isCodec12Response, parseCodec12Response } from './Codec12';
+import { securityManager } from './SecurityManager';
+import { deviceManager } from './DeviceManager';
 
 
 var emitter = new EventEmitter();
@@ -16,7 +18,7 @@ export class UdpServerManager extends EventEmitter {
 
 	public conf: ISocketOptions;
 	
-	public sockets: { [id: string]: { 'imei': string; 'data': ProtocolParser[]; 'socket': Socket }; };
+	public sockets: { [id: string]: { 'imei': string; 'data': ProtocolParser[]; 'socket': Socket; 'ip': string }; };
 
 	constructor(configuration: ISocketOptions) {
 		super();
@@ -33,9 +35,11 @@ export class UdpServerManager extends EventEmitter {
 		this.emit("commandResponse", imei, uuid, response);
 	}
 	
-	deviceConnected(imei: string, uuid: string, socket: Socket) {
+	deviceConnected(imei: string, uuid: string, socket: Socket, ip: string) {
 		// Register with CommandManager for bidirectional commands
 		commandManager.registerDevice(imei, uuid, socket);
+		// Register with SecurityManager
+		securityManager.registerDeviceConnection(ip, imei);
 		this.emit("connected", imei, uuid);
 	}
 
@@ -43,13 +47,23 @@ export class UdpServerManager extends EventEmitter {
 		const server = createServer();
 
 		server.on('connection', (sock: Socket) => {
-			
+			const clientIp = sock.remoteAddress || 'unknown';
 			var uuid = randomUUID();
-			console.log(`New Teltonika device connected with UUID ${uuid}`);
+			
+			// Security: Validate connection attempt
+			const connValidation = securityManager.validateConnection(clientIp);
+			if (!connValidation.allowed) {
+				deviceManager.log('warn', 'TCP', `Connection rejected from ${clientIp}: ${connValidation.reason}`);
+				sock.destroy();
+				return;
+			}
+			
+			deviceManager.log('info', 'TCP', `New connection from ${clientIp}, UUID: ${uuid}`);
+			
 			sock.on("data", (data: Buffer) => {
 				// First check if this is a Codec 12 response
 				if (isCodec12Response(data)) {
-					console.log(`[UdpServerManager] Received Codec 12 response for UUID ${uuid}`);
+					deviceManager.log('debug', 'Codec12', `Response received for UUID ${uuid}`);
 					const handled = commandManager.handlePossibleResponse(uuid, data);
 					if (handled) {
 						// Also emit event for MQTT publishing
@@ -63,17 +77,33 @@ export class UdpServerManager extends EventEmitter {
 				
 				let deviceData = listenForDevice(data);
 				if (deviceData.Content == undefined && deviceData.Imei != undefined) {
+					// Security: Validate IMEI
+					const imeiValidation = securityManager.validateImei(deviceData.Imei);
+					if (!imeiValidation.valid) {
+						deviceManager.log('warn', 'Security', `IMEI rejected: ${deviceData.Imei} - ${imeiValidation.reason}`);
+						// Send rejection (0x00) and close connection
+						sock.write(new Uint8Array([0]));
+						sock.destroy();
+						return;
+					}
 					
-					this.sockets[uuid] = { 'imei': deviceData.Imei, data: [], 'socket': sock };
-					//change this to 0 (0x00) if this IMEI should be disallowed.
-					var imei_answer : Uint8Array;
-					imei_answer = new Uint8Array(1);
-					imei_answer[0]= 1;
-					sock.write(imei_answer);
-					console.log("answered on socket")
+					// Security: Check devices per IP limit
+					const finalConnValidation = securityManager.validateConnection(clientIp, deviceData.Imei);
+					if (!finalConnValidation.allowed) {
+						deviceManager.log('warn', 'Security', `Connection limit exceeded for IP ${clientIp}`);
+						sock.write(new Uint8Array([0]));
+						sock.destroy();
+						return;
+					}
+					
+					this.sockets[uuid] = { 'imei': deviceData.Imei, data: [], 'socket': sock, 'ip': clientIp };
+					
+					// Accept connection (0x01)
+					sock.write(new Uint8Array([1]));
+					deviceManager.log('info', 'TCP', `Device ${deviceData.Imei} authenticated from ${clientIp}`);
 
 					if(deviceData.Imei != undefined){
-						this.deviceConnected(deviceData.Imei, uuid, sock);
+						this.deviceConnected(deviceData.Imei, uuid, sock, clientIp);
 					}
 				} 
 				if (deviceData.Content != undefined && deviceData.Imei == undefined) {
@@ -118,22 +148,29 @@ export class UdpServerManager extends EventEmitter {
 
 			sock.on('close', (err: Boolean) => {
 				if(this.sockets[uuid] == undefined) return;
+				const socketData = this.sockets[uuid];
 				// Unregister from CommandManager
 				commandManager.unregisterDevice(uuid);
-				this.deviceDisconnected(this.sockets[uuid].imei)
+				// Unregister from SecurityManager
+				securityManager.unregisterDeviceConnection(socketData.ip, socketData.imei);
+				this.deviceDisconnected(socketData.imei)
 				delete this.sockets[uuid];
 			});
 			sock.on("error", (err) => {
-				console.log("Caught flash policy server socket error: ")
-				console.log(err.name)
-				// Unregister from CommandManager
-				commandManager.unregisterDevice(uuid);
-				delete this.sockets[uuid];
+				deviceManager.log('error', 'TCP', `Socket error: ${err.name}`);
+				if(this.sockets[uuid]) {
+					const socketData = this.sockets[uuid];
+					// Unregister from CommandManager
+					commandManager.unregisterDevice(uuid);
+					// Unregister from SecurityManager
+					securityManager.unregisterDeviceConnection(socketData.ip, socketData.imei);
+					delete this.sockets[uuid];
+				}
 				// for some reason it goes back to close, make sure to handle this
 			});
 		});
 		server.listen(Number(port), '0.0.0.0', () => {
-			console.log('Listening on all interfaces on port:', port);
+			deviceManager.log('info', 'TCP', `Listening on all interfaces on port: ${port}`);
 		});
 	}
 	deviceDisconnected(imei: string) {
