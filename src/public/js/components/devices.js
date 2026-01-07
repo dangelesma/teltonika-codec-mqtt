@@ -224,6 +224,11 @@ const DevicesComponent = {
     const pos = device.lastPosition;
     const isOnline = device.status === 'online';
     
+    // Build MQTT topic from config
+    const mqttRealm = MqttComponent.config?.realm || 'master';
+    const mqttKeyword = MqttComponent.config?.keyword || 'teltonika';
+    const mqttTopic = `${mqttRealm}/${mqttKeyword}/${device.imei}/data`;
+    
     document.getElementById('device-details').innerHTML = `
       <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
         <!-- Left Column - Basic Info -->
@@ -232,6 +237,25 @@ const DevicesComponent = {
           <div class="p-4 bg-gradient-to-br from-slate-700/50 to-slate-800/50 rounded-xl border border-slate-600/30">
             <div class="text-xs text-slate-500 uppercase tracking-wider mb-1">IMEI</div>
             <div class="font-mono text-xl font-bold text-white">${device.imei}</div>
+          </div>
+          
+          <!-- MQTT Topic Card -->
+          <div class="p-4 bg-gradient-to-br from-emerald-900/30 to-green-900/30 rounded-xl border border-emerald-500/20">
+            <div class="flex items-center gap-2 mb-2">
+              <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.14 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"/>
+              </svg>
+              <span class="text-xs text-emerald-400 uppercase tracking-wider font-medium">MQTT Topic</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 font-mono text-sm text-emerald-300 bg-slate-900/50 px-3 py-2 rounded-lg break-all">${mqttTopic}</code>
+              <button onclick="navigator.clipboard.writeText('${mqttTopic}'); Utils.showToast('Topic copied!', 'success')" 
+                      class="p-2 hover:bg-slate-700/50 rounded-lg transition-colors" title="Copy topic">
+                <svg class="w-4 h-4 text-slate-400 hover:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                </svg>
+              </button>
+            </div>
           </div>
           
           <!-- Status Grid -->
