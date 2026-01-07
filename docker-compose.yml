@@ -7,7 +7,8 @@ services:
     restart: unless-stopped
     ports:
       - "${udpServerOptions__port:-8833}:8833"
-      - "${WEB_API_PORT:-3080}:3000"
+    expose:
+      - "3000"
     environment:
       - NODE_ENV=${NODE_ENV:-production}
       - WEB_API_PORT=3000
@@ -25,7 +26,11 @@ services:
       - udpServerOptions__port=8833
     networks:
       - teltonika-net
+      - dokploy-network
 
 networks:
   teltonika-net:
+    driver: bridge
+  dokploy-network:
+    external: true
     driver: bridge
