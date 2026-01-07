@@ -3,6 +3,8 @@ import { listenForDevice } from './listenForDevice';
 import { randomUUID } from 'crypto';
 import { AVL_Data, Data, GPRS, ProtocolParser } from 'complete-teltonika-parser';
 import EventEmitter = require('events');
+import { commandManager } from './CommandManager';
+import { isCodec12Response, parseCodec12Response } from './Codec12';
 
 
 var emitter = new EventEmitter();
@@ -14,7 +16,7 @@ export class UdpServerManager extends EventEmitter {
 
 	public conf: ISocketOptions;
 	
-	public sockets: { [id: string]: { 'imei': string; 'data': ProtocolParser[]; }; };
+	public sockets: { [id: string]: { 'imei': string; 'data': ProtocolParser[]; 'socket': Socket }; };
 
 	constructor(configuration: ISocketOptions) {
 		super();
@@ -26,7 +28,14 @@ export class UdpServerManager extends EventEmitter {
 	sendMqttMessage(imei: string, uuid:string, content: AVL_Data) {
 		this.emit("message", imei, uuid, content);
 	}
-	deviceConnected(imei: string, uuid: string) {
+	
+	sendCommandResponse(imei: string, uuid: string, response: string) {
+		this.emit("commandResponse", imei, uuid, response);
+	}
+	
+	deviceConnected(imei: string, uuid: string, socket: Socket) {
+		// Register with CommandManager for bidirectional commands
+		commandManager.registerDevice(imei, uuid, socket);
 		this.emit("connected", imei, uuid);
 	}
 
@@ -38,10 +47,24 @@ export class UdpServerManager extends EventEmitter {
 			var uuid = randomUUID();
 			console.log(`New Teltonika device connected with UUID ${uuid}`);
 			sock.on("data", (data: Buffer) => {
+				// First check if this is a Codec 12 response
+				if (isCodec12Response(data)) {
+					console.log(`[UdpServerManager] Received Codec 12 response for UUID ${uuid}`);
+					const handled = commandManager.handlePossibleResponse(uuid, data);
+					if (handled) {
+						// Also emit event for MQTT publishing
+						const parsed = parseCodec12Response(data);
+						if (parsed.success && this.sockets[uuid]) {
+							this.sendCommandResponse(this.sockets[uuid].imei, uuid, parsed.response || '');
+						}
+						return;
+					}
+				}
+				
 				let deviceData = listenForDevice(data);
 				if (deviceData.Content == undefined && deviceData.Imei != undefined) {
 					
-					this.sockets[uuid] = { 'imei': deviceData.Imei, data: [] };
+					this.sockets[uuid] = { 'imei': deviceData.Imei, data: [], 'socket': sock };
 					//change this to 0 (0x00) if this IMEI should be disallowed.
 					var imei_answer : Uint8Array;
 					imei_answer = new Uint8Array(1);
@@ -50,7 +73,7 @@ export class UdpServerManager extends EventEmitter {
 					console.log("answered on socket")
 
 					if(deviceData.Imei != undefined){
-						this.deviceConnected(deviceData.Imei, uuid);
+						this.deviceConnected(deviceData.Imei, uuid, sock);
 					}
 				} 
 				if (deviceData.Content != undefined && deviceData.Imei == undefined) {
@@ -94,13 +117,17 @@ export class UdpServerManager extends EventEmitter {
 			});
 
 			sock.on('close', (err: Boolean) => {
-				if(this.sockets[uuid] == undefined) return; 
+				if(this.sockets[uuid] == undefined) return;
+				// Unregister from CommandManager
+				commandManager.unregisterDevice(uuid);
 				this.deviceDisconnected(this.sockets[uuid].imei)
 				delete this.sockets[uuid];
 			});
 			sock.on("error", (err) => {
 				console.log("Caught flash policy server socket error: ")
 				console.log(err.name)
+				// Unregister from CommandManager
+				commandManager.unregisterDevice(uuid);
 				delete this.sockets[uuid];
 				// for some reason it goes back to close, make sure to handle this
 			});
@@ -111,6 +138,18 @@ export class UdpServerManager extends EventEmitter {
 	}
 	deviceDisconnected(imei: string) {
 		this.emit("disconnected", imei);
+	}
+	
+	/**
+	 * Get socket by IMEI for sending commands
+	 */
+	getSocketByImei(imei: string): Socket | undefined {
+		for (const uuid in this.sockets) {
+			if (this.sockets[uuid].imei === imei) {
+				return this.sockets[uuid].socket;
+			}
+		}
+		return undefined;
 	}
 }
 

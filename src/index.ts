@@ -8,6 +8,7 @@ import { UdpServerManager } from "./UdpServerManager";
 import { readFileSync } from "fs";
 import { IClientOptions, IConnackPacket, MqttClient, connect } from "mqtt";
 import moment = require("moment");
+import { commandManager } from "./CommandManager";
 // import dotenv
 import * as dotenv from 'dotenv';
 let out = dotenv.config({ path: process.cwd()+'/.env' });
@@ -26,7 +27,7 @@ const commandTopic = (opts: orOptions, uuid: string, imei: string) => {
   return `${opts.realm}/${uuid}/${opts.teltonika_keyword}/${imei}/${opts.commandTopic}`;
 };
 
-var clients: { [imei: string]: { client: MqttClient } } = {};
+var clients: { [imei: string]: { client: MqttClient; uuid: string } } = {};
 
 var opts = {
   orOpts: {
@@ -48,6 +49,8 @@ var opts = {
 if (typeof opts.udp_options.port !== 'number') throw new Error("UDP port not defined, check env file");
 
 const server = new UdpServerManager(opts.udp_options);
+
+// Handle AVL data messages
 server.on("message", (imei: string, uuid: string, content: AVL_Data) => {
   console.log(`${imei}\t${content.Timestamp.toDateString()}\t${content.IOelement.ElementCount}`);
   var mqttMsg = processAvlData(content);
@@ -60,20 +63,100 @@ server.on("message", (imei: string, uuid: string, content: AVL_Data) => {
     JSON.stringify(mqttMsg)
   );
 });
+
+// Handle command responses (Codec 12)
+server.on("commandResponse", (imei: string, uuid: string, response: string) => {
+  console.log(`[Codec12] Command response from ${imei}: ${response}`);
+  if (clients[imei] && clients[imei].client.connected) {
+    const responseMsg = {
+      state: {
+        reported: {
+          command_response: response,
+          ts: moment().valueOf()
+        }
+      }
+    };
+    clients[imei].client.publish(
+      dataTopic(opts.orOpts, uuid, imei),
+      JSON.stringify(responseMsg)
+    );
+    console.log(`[Codec12] Published response to ${dataTopic(opts.orOpts, uuid, imei)}`);
+  }
+});
+
+// Handle device connection
 server.on("connected", (imei: string, uuid: string) => {
   console.log(`CONNECT: Device with IMEI ${imei} connected`);
   const clientOptions: IClientOptions = opts.mqttOptions as IClientOptions;
-  clientOptions["clientId"] = uuid;
+  clientOptions["clientId"] = `teltonika_${imei}_${Date.now()}`;
   const client: MqttClient = connect(clientOptions as IClientOptions);
-  client.subscribe(commandTopic(opts.orOpts, uuid, imei));
-  client.subscribe(dataTopic(opts.orOpts, uuid, imei));
-  clients[imei] = { client: client };
+  
+  client.on('connect', () => {
+    console.log(`[MQTT] Connected for device ${imei}`);
+    
+    // Subscribe to command topic for this device
+    const cmdTopic = commandTopic(opts.orOpts, uuid, imei);
+    client.subscribe(cmdTopic, (err) => {
+      if (err) {
+        console.error(`[MQTT] Error subscribing to ${cmdTopic}:`, err);
+      } else {
+        console.log(`[MQTT] Subscribed to command topic: ${cmdTopic}`);
+      }
+    });
+    
+    // Subscribe to data topic
+    client.subscribe(dataTopic(opts.orOpts, uuid, imei));
+  });
+  
+  // Handle incoming MQTT messages (commands)
+  client.on('message', async (topic: string, message: Buffer) => {
+    const cmdTopic = commandTopic(opts.orOpts, uuid, imei);
+    
+    if (topic === cmdTopic) {
+      const command = message.toString().trim();
+      console.log(`[MQTT] Received command for ${imei}: "${command}"`);
+      
+      if (command && command.length > 0) {
+        try {
+          // Send command via Codec 12
+          const response = await commandManager.sendCommand(imei, command);
+          
+          if (response.success) {
+            console.log(`[Codec12] Command successful for ${imei}: ${response.response}`);
+          } else {
+            console.error(`[Codec12] Command failed for ${imei}: ${response.error}`);
+            // Publish error to data topic
+            const errorMsg = {
+              state: {
+                reported: {
+                  command_error: response.error,
+                  command_sent: command,
+                  ts: moment().valueOf()
+                }
+              }
+            };
+            client.publish(dataTopic(opts.orOpts, uuid, imei), JSON.stringify(errorMsg));
+          }
+        } catch (error) {
+          console.error(`[Codec12] Error sending command to ${imei}:`, error);
+        }
+      }
+    }
+  });
+  
+  client.on('error', (err) => {
+    console.error(`[MQTT] Error for device ${imei}:`, err);
+  });
+  
+  clients[imei] = { client: client, uuid: uuid };
 });
 
 server.on("disconnected", (imei: string) => {
   console.log(`DISCONNECT: Device with IMEI ${imei} disconnected`);
-  clients[imei].client.end();
-  delete clients[imei];
+  if (clients[imei]) {
+    clients[imei].client.end();
+    delete clients[imei];
+  }
 });
 
 function processAvlData(avlData: AVL_Data) {

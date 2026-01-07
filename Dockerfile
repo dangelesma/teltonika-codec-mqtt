@@ -1,11 +1,12 @@
-# Use Node.js v14 as the base image
-FROM node:14
+# Use Node.js LTS as the base image
+FROM node:18-alpine
 
 # Set the working directory
 WORKDIR /usr/src/app
 
 # Copy package.json and package-lock.json
 COPY package*.json ./
+COPY tsconfig.json ./
 
 # Install dependencies
 RUN npm install
@@ -14,12 +15,10 @@ RUN npm install
 COPY src ./src
 
 # Compile TypeScript to JavaScript
-RUN npx tsc src/index.ts -outDir out
+RUN npx tsc
 
-# Use .env file for environment variables
-ARG ENV_FILE
-ENV ENV_FILE=${ENV_FILE:-.env}
-COPY ${ENV_FILE} .env
+# Expose the TCP port for Teltonika devices
+EXPOSE 8833
 
 # Set the command to run your application
 CMD [ "node", "out/index.js" ]

@@ -1,76 +1,159 @@
-# Teltonika Telematics Codec to Codec JSON and MQTT
+# Teltonika Codec to MQTT with Bidirectional Commands
 
-This TypeScript project converts a Teltonika device's UDP connection, that transmits data using Codec 8/8E, into an MQTT connection that transmits data using Codec JSON.
-
-This is used for integrating legacy devices within OpenRemote, the open-source IoT device management platform. In this way, we are able to support all versions of Teltonika devices, regardless of their Codec/Protocol support.
-
-To use, change the variables found within index.ts. If setup properly, OpenRemote will transmit the messages to the OpenRemote MQTT Broker. 
-
-# Quickstart
-Download the ``docker-compose.yml`` file:
-```bash
-wget https://github.com/pankalog/TeltonikaLegacyCodecSupport/blob/main/docker-compose.yml
-```
-
-And run the server:
-```bash
-docker-compose -p teltonika-server up -d
-```
-## Customization, environment variables
-To set your own environment variables, download the example `.env` file:
-```bash
-wget https://github.com/pankalog/TeltonikaLegacyCodecSupport/blob/main/.env
-```
-And edit the file to match your specific server settings.
-
-# Description
-
-To allow support of all devices within OpenRemote, a new server has been developed. When the server receives properly-formatted and sequenced data, according to **Teltonika's Codec 8 and 8E** documentation, the server will then connect with a unique MQTT client ID to the specified MQTT broker, sending the contents of the UDP Codec 8 payload formatted in the same way as a [Codec JSON](https://wiki.teltonika-gps.com/view/Codec_JSON), MQTT payload message.
-
-In this way, this server serves as an adapter between older devices with no support for MQTT and/or Codec JSON to the more recent transmission protocol and codec, assuring maximum compatibility of OpenRemote with the entirety of the product-line of Teltonika Telematics.
-
-# Format
-
-The server allows for Teltonika devices to connect using Codec 8 and 8E protocols. Any data that is sent to the server is sent via MQTT to any server and topic the user selects in Teltonika's [Codec JSON](https://wiki.teltonika-gps.com/view/Codec_JSON) format. Different devices use different UUIDs as the client ID. 
-
-# How it works
-
-The index file is the main developer interface for the server. The UDPServerManager is an EventEmitter, and the events emitted are where the MQTT messages are constructed and sent to the MQTT broker. 
-
-Here is a description of what each `UdpServerManager` event is:
-
-* `message`: `imei, uuid, content` :  When a `message` event is emitted, the device with `imei` and `uuid` has sent a data packet, which is of type `ProtocolParser`. Using that class, you can check the metadata of the packet to ensure it contains data the user requires. 
-
-* `connected`: `imei, uuid`: A device with the `imei` has connected, and it has been assigned with `uuid`. Used for creating a connection to the MQTT broker using the `uuid` as a client ID
-
-* `disconnected`: `imei`: The device with `imei` has disconnected. 
-
-# Libraries
-
-* [`complete-teltonika-parser`](https://github.com/TimeLord2010/TeltonikaParser): used to parse Teltonika payloads and conduct all necessary checks and data parsing from the devices.
-
-* [`mqtt`](https://github.com/mqttjs/MQTT.js): MQTT.js used for interfacing to the MQTT broker
-
-* [`moment`](https://github.com/moment/moment): Used for timestamp manipulation, for correct payload formatting 
-
-* [`net`](https://github.com/sleeplessinc/net): Used for creating the UDPServer
-
-* `crypto`: Used for generating UUIDs.
-
-* `events`: Used for extending the EventEmitter
+This TypeScript project converts Teltonika device TCP connections (Codec 8/8E) to MQTT, with full **Codec 12 bidirectional command support** for FMB920 and compatible devices.
 
 ## Features
 
-1. Compatibility is based solely on npm package `complete-teltonika-parser`, the base of this package
-2. Allows for any type of MQTT(s) connection to be established
-3. Allows for UDP connection by the device to the application
-4. Allows multiple devices to be connected by managing WS states
-5. Raises events in UdpServerManager; for now, these events are fired when a device is connected, sends a message, and disconnects.
+- ✅ **Codec 8/8E Support**: Receive telemetry data from Teltonika devices
+- ✅ **Codec 12 Commands**: Send GPRS commands to devices via MQTT
+- ✅ **MQTT Integration**: Publish data and receive commands via MQTT broker
+- ✅ **Docker Ready**: Deploy with Docker Compose or Dokploy
+- ✅ **OpenRemote Compatible**: Works with OpenRemote IoT platform
 
-## To-Do
+## Quick Start with Docker Compose
 
-1. Safe device connect/disconnect
-2. Bidirectional communication to/from the device, including SMS messages
-3. MQTT state watch
-4. Implement more events
-5. Check multi-device support
+1. Clone the repository:
+```bash
+git clone https://github.com/YOUR_USERNAME/teltonika-codec-mqtt.git
+cd teltonika-codec-mqtt
+```
+
+2. Create your `.env` file:
+```bash
+cp .env.example .env
+# Edit .env with your MQTT broker settings
+```
+
+3. Run the server:
+```bash
+docker-compose up -d
+```
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `mqttOptions__host` | localhost | MQTT broker hostname |
+| `mqttOptions__port` | 1883 | MQTT broker port |
+| `mqttOptions__protocol` | mqtt | Protocol (mqtt, mqtts, ws, wss) |
+| `orOpts__realm` | master | MQTT topic realm prefix |
+| `orOpts__teltonika_keyword` | teltonika | Topic keyword for Teltonika |
+| `orOpts__dataTopic` | data | Data topic suffix |
+| `orOpts__commandTopic` | commands | Command topic suffix |
+| `udpServerOptions__port` | 8833 | TCP port for device connections |
+
+## MQTT Topics
+
+### Data Topic (Device → MQTT)
+```
+{realm}/{uuid}/teltonika/{imei}/data
+```
+
+Telemetry data format:
+```json
+{
+  "state": {
+    "reported": {
+      "latlng": "lat,lng",
+      "ts": 1704672000000,
+      "alt": "123",
+      "ang": "180",
+      "sat": "12",
+      "sp": "60",
+      "evt": "0"
+    }
+  }
+}
+```
+
+### Command Topic (MQTT → Device)
+```
+{realm}/{uuid}/teltonika/{imei}/commands
+```
+
+Send plain text commands:
+```
+getinfo
+getver
+setparam 2001:30
+```
+
+### Command Response (Device → MQTT)
+```json
+{
+  "state": {
+    "reported": {
+      "command_response": "Device response text",
+      "ts": 1704672000000
+    }
+  }
+}
+```
+
+## Codec 12 Commands
+
+The server supports **Codec 12** for bidirectional GPRS commands:
+
+1. **Subscribe to commands**: Server listens on `{realm}/{uuid}/teltonika/{imei}/commands`
+2. **Send command**: Publish plain text command to the topic
+3. **Receive response**: Response published to data topic with `command_response` field
+
+### Example Commands for FMB920
+
+| Command | Description |
+|---------|-------------|
+| `getinfo` | Get device information |
+| `getver` | Get firmware version |
+| `getstatus` | Get device status |
+| `getgps` | Get current GPS position |
+| `setparam 2001:30` | Set parameter (e.g., data sending period) |
+| `cpureset` | Reset device |
+
+## Deploy to Dokploy
+
+1. Push repository to GitHub
+2. In Dokploy, create new application from Git
+3. Select **Docker Compose** deployment
+4. Add environment variables in Dokploy settings
+5. Deploy!
+
+## Development
+
+```bash
+# Install dependencies
+npm install
+
+# Build TypeScript
+npm run build
+
+# Run in development
+npm run dev
+
+# Run production
+npm start
+```
+
+## Architecture
+
+```
+┌─────────────────┐      TCP/8833      ┌─────────────────────┐
+│  Teltonika      │◄──────────────────►│  Teltonika Server   │
+│  FMB920         │   Codec 8/8E/12    │  (This Project)     │
+└─────────────────┘                    └──────────┬──────────┘
+                                                  │
+                                                  │ MQTT
+                                                  ▼
+                                       ┌─────────────────────┐
+                                       │   MQTT Broker       │
+                                       │   (OpenRemote/etc)  │
+                                       └─────────────────────┘
+```
+
+## Libraries
+
+- [`complete-teltonika-parser`](https://github.com/TimeLord2010/TeltonikaParser): Parse Teltonika Codec 8/8E payloads
+- [`mqtt`](https://www.npmjs.com/package/mqtt): MQTT client for Node.js
+
+## License
+
+ISC
