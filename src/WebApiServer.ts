@@ -1,5 +1,6 @@
 /**
- * Web API Server - REST API and WebSocket for device management
+ * Web API Server - REST API, WebSocket, and Modern Web Dashboard
+ * Features: JWT Auth, OpenStreetMap, Real-time updates, Command feedback
  */
 
 import { createServer, IncomingMessage, ServerResponse } from 'http';
@@ -7,75 +8,63 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { deviceManager, DeviceInfo, LogEntry } from './DeviceManager';
 import { commandManager } from './CommandManager';
 import { securityManager } from './SecurityManager';
-import { readFileSync, existsSync } from 'fs';
-import { join } from 'path';
 import { randomUUID } from 'crypto';
+import * as jwt from 'jsonwebtoken';
 
 export interface ApiConfig {
   port: number;
   host: string;
 }
 
+interface AuthenticatedWsClient {
+  ws: WebSocket;
+  authenticated: boolean;
+  ip: string;
+  userId?: string;
+}
+
 export class WebApiServer {
   private httpServer: ReturnType<typeof createServer>;
   private wss: WebSocketServer;
   private config: ApiConfig;
-  private wsClients: Map<WebSocket, { authenticated: boolean; ip: string }> = new Map();
+  private wsClients: Map<WebSocket, AuthenticatedWsClient> = new Map();
+  
+  private readonly jwtSecret: string;
+  private readonly adminUser: string;
+  private readonly adminPass: string;
 
   constructor(config: ApiConfig) {
     this.config = config;
     this.httpServer = createServer(this.handleRequest.bind(this));
     this.wss = new WebSocketServer({ server: this.httpServer });
     
+    this.jwtSecret = process.env.JWT_SECRET || randomUUID();
+    this.adminUser = process.env.ADMIN_USER || 'admin';
+    this.adminPass = process.env.ADMIN_PASSWORD || 'admin123';
+    
     this.setupWebSocket();
     this.setupDeviceEvents();
   }
 
-  /**
-   * Start the server
-   */
   start(): void {
     this.httpServer.listen(this.config.port, this.config.host, () => {
       deviceManager.log('info', 'WebAPI', `Web interface running at http://${this.config.host}:${this.config.port}`);
-      // Show API key on startup if enabled
-      if (process.env.SECURITY_API_KEY_ENABLED === 'true') {
-        deviceManager.log('info', 'Security', `API Key authentication enabled. Key: ${securityManager.getApiKey()}`);
+      if (this.adminUser !== 'admin' || this.adminPass !== 'admin123') {
+        deviceManager.log('info', 'WebAPI', `Login enabled for user: ${this.adminUser}`);
+      } else {
+        deviceManager.log('warn', 'WebAPI', 'Using default credentials! Set ADMIN_USER and ADMIN_PASSWORD in ENV');
       }
     });
   }
 
-  /**
-   * Setup WebSocket connections
-   */
   private setupWebSocket(): void {
     this.wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
-      const clientIp = securityManager.getClientIp(req);
-      
-      // Security: Check web access
-      const accessCheck = securityManager.validateWebAccess(clientIp);
-      if (!accessCheck.allowed) {
-        deviceManager.log('warn', 'WebSocket', `Connection rejected from ${clientIp}: ${accessCheck.reason}`);
-        ws.close(1008, accessCheck.reason);
-        return;
-      }
-      
-      deviceManager.log('info', 'WebSocket', `Client connected from ${clientIp}`);
-      this.wsClients.set(ws, { authenticated: false, ip: clientIp });
+      const clientIp = this.getClientIp(req);
+      this.wsClients.set(ws, { ws, authenticated: false, ip: clientIp });
 
-      // Send initial state (limited if not authenticated)
-      ws.send(JSON.stringify({
-        type: 'init',
-        data: {
-          devices: deviceManager.getAllDevices(),
-          stats: deviceManager.getStats(),
-          logs: deviceManager.getLogs(50),
-          security: securityManager.getStatus()
-        }
-      }));
-
-      ws.on('message', async (message: Buffer) => {
+      ws.on('message', async (data: Buffer) => {
         try {
-          const msg = JSON.parse(message.toString());
+          const msg = JSON.parse(data.toString());
           await this.handleWsMessage(ws, msg);
         } catch (e) {
           ws.send(JSON.stringify({ type: 'error', message: 'Invalid message format' }));
@@ -84,389 +73,252 @@ export class WebApiServer {
 
       ws.on('close', () => {
         this.wsClients.delete(ws);
-        deviceManager.log('info', 'WebSocket', 'Client disconnected');
       });
     });
   }
 
-  /**
-   * Setup device event listeners for real-time updates
-   */
-  private setupDeviceEvents(): void {
-    deviceManager.on('deviceConnected', (device: DeviceInfo) => {
-      this.broadcast({ type: 'deviceConnected', data: device });
-    });
-
-    deviceManager.on('deviceDisconnected', (device: DeviceInfo) => {
-      this.broadcast({ type: 'deviceDisconnected', data: device });
-    });
-
-    deviceManager.on('positionUpdate', (device: DeviceInfo) => {
-      this.broadcast({ type: 'positionUpdate', data: device });
-    });
-
-    deviceManager.on('commandSent', (data: any) => {
-      this.broadcast({ type: 'commandSent', data });
-    });
-
-    deviceManager.on('commandResponse', (data: any) => {
-      this.broadcast({ type: 'commandResponse', data });
-    });
-
-    deviceManager.on('log', (entry: LogEntry) => {
-      this.broadcast({ type: 'log', data: entry });
-    });
-  }
-
-  /**
-   * Broadcast message to all WebSocket clients
-   */
-  private broadcast(message: any): void {
-    const data = JSON.stringify(message);
-    this.wsClients.forEach((clientInfo, ws) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(data);
-      }
-    });
-  }
-
-  /**
-   * Handle WebSocket messages
-   */
   private async handleWsMessage(ws: WebSocket, msg: any): Promise<void> {
+    const client = this.wsClients.get(ws);
+    if (!client) return;
+
+    if (msg.type === 'auth') {
+      try {
+        const decoded = jwt.verify(msg.token, this.jwtSecret) as any;
+        client.authenticated = true;
+        client.userId = decoded.user;
+        
+        ws.send(JSON.stringify({ type: 'authSuccess', user: decoded.user }));
+        ws.send(JSON.stringify({
+          type: 'init',
+          data: {
+            devices: deviceManager.getAllDevices(),
+            stats: deviceManager.getStats(),
+            logs: deviceManager.getLogs(50)
+          }
+        }));
+      } catch (e) {
+        ws.send(JSON.stringify({ type: 'authError', message: 'Invalid token' }));
+      }
+      return;
+    }
+
+    if (!client.authenticated) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Not authenticated' }));
+      return;
+    }
+
     switch (msg.type) {
       case 'sendCommand':
-        if (msg.imei && msg.command) {
-          const commandId = randomUUID();
-          deviceManager.addCommand(msg.imei, commandId, msg.command);
-          
-          const response = await commandManager.sendCommand(msg.imei, msg.command);
-          deviceManager.updateCommandResponse(
-            msg.imei, 
-            commandId, 
-            response.response || '', 
-            response.success, 
-            response.error
-          );
-          
-          ws.send(JSON.stringify({ 
-            type: 'commandResult', 
-            data: { imei: msg.imei, commandId, response } 
-          }));
-        }
+        await this.handleSendCommand(ws, msg);
         break;
-
-      case 'getDevices':
-        ws.send(JSON.stringify({ 
-          type: 'devices', 
-          data: deviceManager.getAllDevices() 
-        }));
+      case 'addToWhitelist':
+        securityManager.addImeiToWhitelist(msg.imei);
+        this.broadcastAuthenticated({ type: 'whitelistUpdated', whitelist: securityManager.getImeiWhitelist() });
         break;
-
+      case 'removeFromWhitelist':
+        securityManager.removeImeiFromWhitelist(msg.imei);
+        this.broadcastAuthenticated({ type: 'whitelistUpdated', whitelist: securityManager.getImeiWhitelist() });
+        break;
       case 'getLogs':
-        ws.send(JSON.stringify({ 
-          type: 'logs', 
-          data: deviceManager.getLogs(msg.limit || 100, msg.level) 
-        }));
+        ws.send(JSON.stringify({ type: 'logs', data: deviceManager.getLogs(msg.limit || 100, msg.level) }));
         break;
-
       case 'clearLogs':
         deviceManager.clearLogs();
-        ws.send(JSON.stringify({ type: 'logsCleared' }));
+        this.broadcastAuthenticated({ type: 'logsCleared' });
         break;
-
-      case 'getStats':
-        ws.send(JSON.stringify({ 
-          type: 'stats', 
-          data: deviceManager.getStats() 
-        }));
+      case 'getSecurityConfig':
+        ws.send(JSON.stringify({ type: 'securityConfig', data: this.getSafeSecurityConfig() }));
+        break;
+      case 'updateSecurityConfig':
+        securityManager.updateConfig(msg.config);
+        this.broadcastAuthenticated({ type: 'securityConfigUpdated', data: this.getSafeSecurityConfig() });
         break;
     }
   }
 
-  /**
-   * Handle HTTP requests
-   */
+  private async handleSendCommand(ws: WebSocket, msg: any): Promise<void> {
+    const { imei, command, commandId } = msg;
+    
+    if (!imei || !command) {
+      ws.send(JSON.stringify({ type: 'commandError', commandId, error: 'IMEI and command required' }));
+      return;
+    }
+
+    ws.send(JSON.stringify({ type: 'commandPending', commandId, imei, command }));
+
+    try {
+      // Add to command history
+      const cmdEntry = deviceManager.addCommand(imei, commandId || Date.now().toString(), command);
+      
+      const response = await commandManager.sendCommand(imei, command);
+      
+      // Update command history with response
+      if (cmdEntry) {
+        deviceManager.updateCommandResponse(imei, cmdEntry.id, response.response || '', response.success, response.error);
+      }
+      
+      ws.send(JSON.stringify({
+        type: 'commandResponse', commandId, imei, command,
+        success: response.success, response: response.response, error: response.error
+      }));
+
+      this.broadcastAuthenticated({
+        type: 'deviceCommandResponse', imei, command,
+        response: response.response, success: response.success
+      });
+    } catch (error: any) {
+      ws.send(JSON.stringify({ type: 'commandError', commandId, imei, command, error: error.message }));
+    }
+  }
+
+  private getSafeSecurityConfig(): any {
+    const config = securityManager.getFullConfig();
+    return { ...config, apiKey: config.apiKey ? '********' : '' };
+  }
+
+  private setupDeviceEvents(): void {
+    deviceManager.on('deviceConnected', (device: DeviceInfo) => {
+      this.broadcastAuthenticated({ type: 'deviceConnected', data: device });
+    });
+
+    deviceManager.on('deviceDisconnected', (imei: string) => {
+      this.broadcastAuthenticated({ type: 'deviceDisconnected', data: { imei } });
+    });
+
+    deviceManager.on('positionUpdate', (device: DeviceInfo) => {
+      this.broadcastAuthenticated({ type: 'positionUpdate', data: device });
+    });
+
+    deviceManager.on('log', (log: LogEntry) => {
+      this.broadcastAuthenticated({ type: 'log', data: log });
+    });
+
+    setInterval(() => {
+      this.broadcastAuthenticated({ type: 'stats', data: deviceManager.getStats() });
+    }, 5000);
+  }
+
+  private broadcastAuthenticated(msg: any): void {
+    const data = JSON.stringify(msg);
+    this.wsClients.forEach(client => {
+      if (client.authenticated && client.ws.readyState === WebSocket.OPEN) {
+        client.ws.send(data);
+      }
+    });
+  }
+
+  private getClientIp(req: IncomingMessage): string {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (forwarded) {
+      return (Array.isArray(forwarded) ? forwarded[0] : forwarded).split(',')[0].trim();
+    }
+    return req.socket.remoteAddress || 'unknown';
+  }
+
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
-    const clientIp = securityManager.getClientIp(req);
     
-    // CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
-
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
       return;
     }
 
-    // Security: Rate limit check
-    const rateLimit = securityManager.checkRateLimit(clientIp);
-    res.setHeader('X-RateLimit-Remaining', rateLimit.remaining.toString());
-    res.setHeader('X-RateLimit-Reset', Math.ceil(rateLimit.resetIn / 1000).toString());
-    
-    if (!rateLimit.allowed) {
-      res.writeHead(429, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: false, error: 'Rate limit exceeded' }));
-      return;
-    }
-
-    // API Routes
     if (url.pathname.startsWith('/api/')) {
-      await this.handleApiRequest(req, res, url, clientIp);
+      await this.handleApiRequest(req, res, url);
       return;
     }
 
-    // Static files / Web UI
     this.serveStaticFile(req, res, url);
   }
 
-  /**
-   * Handle API requests
-   */
-  private async handleApiRequest(req: IncomingMessage, res: ServerResponse, url: URL, clientIp: string): Promise<void> {
+  private async handleApiRequest(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     const sendJson = (data: any, status: number = 200) => {
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(data));
     };
 
-    // Security: Validate API authentication for protected endpoints
-    const publicEndpoints = ['/api/health', '/api/stats'];
-    const isPublic = publicEndpoints.includes(url.pathname);
-    
-    if (!isPublic) {
-      const authResult = securityManager.validateApiAuth(req);
+    try {
+      if (url.pathname === '/api/health') {
+        sendJson({ success: true, status: 'healthy' });
+        return;
+      }
+
+      if (url.pathname === '/api/auth/login' && req.method === 'POST') {
+        const body = await this.readBody(req);
+        const { username, password } = JSON.parse(body);
+        
+        if (username === this.adminUser && password === this.adminPass) {
+          const token = jwt.sign({ user: username }, this.jwtSecret, { expiresIn: '24h' });
+          sendJson({ success: true, token, user: username });
+        } else {
+          sendJson({ success: false, error: 'Invalid credentials' }, 401);
+        }
+        return;
+      }
+
+      if (url.pathname === '/api/auth/verify') {
+        const authResult = this.verifyToken(req);
+        if (authResult.valid) {
+          sendJson({ success: true, user: authResult.user });
+        } else {
+          sendJson({ success: false, error: authResult.error }, 401);
+        }
+        return;
+      }
+
+      const authResult = this.verifyToken(req);
       if (!authResult.valid) {
         sendJson({ success: false, error: authResult.error }, 401);
         return;
       }
-    }
 
-    try {
-      // GET /api/health - Health check (public)
-      if (url.pathname === '/api/health' && req.method === 'GET') {
-        sendJson({ success: true, status: 'healthy', timestamp: new Date().toISOString() });
-        return;
-      }
-
-      // GET /api/stats - Get statistics (public)
-      if (url.pathname === '/api/stats' && req.method === 'GET') {
+      if (url.pathname === '/api/stats') {
         sendJson({ success: true, stats: deviceManager.getStats() });
         return;
       }
 
-      // GET /api/security - Get security status
-      if (url.pathname === '/api/security' && req.method === 'GET') {
-        sendJson({ success: true, security: securityManager.getStatus() });
-        return;
-      }
-
-      // GET /api/security/whitelist - Get IMEI whitelist
-      if (url.pathname === '/api/security/whitelist' && req.method === 'GET') {
-        sendJson({ success: true, whitelist: securityManager.getImeiWhitelist() });
-        return;
-      }
-
-      // POST /api/security/whitelist - Add IMEI to whitelist
-      if (url.pathname === '/api/security/whitelist' && req.method === 'POST') {
-        const body = await this.readBody(req);
-        const { imei } = JSON.parse(body);
-        if (!imei) {
-          sendJson({ success: false, error: 'IMEI is required' }, 400);
-          return;
-        }
-        securityManager.addImeiToWhitelist(imei);
-        sendJson({ success: true, message: `IMEI ${imei} added to whitelist` });
-        return;
-      }
-
-      // DELETE /api/security/whitelist/:imei - Remove IMEI from whitelist
-      const whitelistMatch = url.pathname.match(/^\/api\/security\/whitelist\/(\d+)$/);
-      if (whitelistMatch && req.method === 'DELETE') {
-        securityManager.removeImeiFromWhitelist(whitelistMatch[1]);
-        sendJson({ success: true, message: `IMEI ${whitelistMatch[1]} removed from whitelist` });
-        return;
-      }
-
-      // GET /api/security/blocked - Get blocked IPs
-      if (url.pathname === '/api/security/blocked' && req.method === 'GET') {
-        sendJson({ success: true, blockedIps: securityManager.getBlockedIps() });
-        return;
-      }
-
-      // POST /api/security/block - Block an IP
-      if (url.pathname === '/api/security/block' && req.method === 'POST') {
-        const body = await this.readBody(req);
-        const { ip, duration } = JSON.parse(body);
-        if (!ip) {
-          sendJson({ success: false, error: 'IP is required' }, 400);
-          return;
-        }
-        securityManager.blockIp(ip, duration || 3600000);
-        sendJson({ success: true, message: `IP ${ip} blocked` });
-        return;
-      }
-
-      // DELETE /api/security/block/:ip - Unblock an IP
-      if (url.pathname.startsWith('/api/security/block/') && req.method === 'DELETE') {
-        const ip = url.pathname.replace('/api/security/block/', '');
-        securityManager.unblockIp(ip);
-        sendJson({ success: true, message: `IP ${ip} unblocked` });
-        return;
-      }
-
-      // GET /api/security/config - Get full security configuration
-      if (url.pathname === '/api/security/config' && req.method === 'GET') {
-        const config = securityManager.getFullConfig();
-        // Hide API key value for security
-        sendJson({ 
-          success: true, 
-          config: { 
-            ...config, 
-            apiKey: config.apiKey ? '********' : '' 
-          } 
-        });
-        return;
-      }
-
-      // PUT /api/security/config - Update security configuration
-      if (url.pathname === '/api/security/config' && req.method === 'PUT') {
-        const body = await this.readBody(req);
-        const updates = JSON.parse(body);
-        
-        // Validate and sanitize updates
-        const allowedKeys = [
-          'apiKeyEnabled', 'imeiWhitelistEnabled', 'rateLimitEnabled',
-          'rateLimitWindow', 'rateLimitMaxRequests', 'ipWhitelistEnabled',
-          'maxDevicesPerIp', 'maxConnectionAttempts', 'connectionAttemptWindow'
-        ];
-        
-        const sanitizedUpdates: any = {};
-        for (const key of allowedKeys) {
-          if (updates[key] !== undefined) {
-            sanitizedUpdates[key] = updates[key];
-          }
-        }
-        
-        // Handle arrays separately
-        if (updates.imeiWhitelist && Array.isArray(updates.imeiWhitelist)) {
-          sanitizedUpdates.imeiWhitelist = updates.imeiWhitelist;
-        }
-        if (updates.ipWhitelist && Array.isArray(updates.ipWhitelist)) {
-          sanitizedUpdates.ipWhitelist = updates.ipWhitelist;
-        }
-        
-        // Allow updating API key only if explicitly provided and not empty
-        if (updates.apiKey && updates.apiKey.length > 0 && updates.apiKey !== '********') {
-          sanitizedUpdates.apiKey = updates.apiKey;
-        }
-        
-        securityManager.updateConfig(sanitizedUpdates);
-        sendJson({ success: true, message: 'Configuration updated' });
-        return;
-      }
-
-      // POST /api/security/config/regenerate-key - Generate new API key
-      if (url.pathname === '/api/security/config/regenerate-key' && req.method === 'POST') {
-        const { randomBytes } = await import('crypto');
-        const newKey = randomBytes(32).toString('hex');
-        securityManager.updateConfig({ apiKey: newKey });
-        sendJson({ success: true, apiKey: newKey });
-        return;
-      }
-
-      // GET /api/devices - List all devices
-      if (url.pathname === '/api/devices' && req.method === 'GET') {
+      if (url.pathname === '/api/devices') {
         sendJson({ success: true, devices: deviceManager.getAllDevices() });
         return;
       }
 
-      // GET /api/devices/:imei - Get specific device
-      const deviceMatch = url.pathname.match(/^\/api\/devices\/(\d+)$/);
-      if (deviceMatch && req.method === 'GET') {
-        const device = deviceManager.getDevice(deviceMatch[1]);
-        if (device) {
-          sendJson({ success: true, device });
-        } else {
-          sendJson({ success: false, error: 'Device not found' }, 404);
+      if (url.pathname === '/api/security/whitelist') {
+        if (req.method === 'GET') {
+          sendJson({ success: true, whitelist: securityManager.getImeiWhitelist() });
+        } else if (req.method === 'POST') {
+          const body = await this.readBody(req);
+          const { imei } = JSON.parse(body);
+          securityManager.addImeiToWhitelist(imei);
+          sendJson({ success: true });
         }
         return;
       }
 
-      // POST /api/devices/:imei/command - Send command to device
-      const commandMatch = url.pathname.match(/^\/api\/devices\/(\d+)\/command$/);
-      if (commandMatch && req.method === 'POST') {
-        const body = await this.readBody(req);
-        const { command } = JSON.parse(body);
-        
-        if (!command) {
-          sendJson({ success: false, error: 'Command is required' }, 400);
-          return;
-        }
-
-        const imei = commandMatch[1];
-        const commandId = randomUUID();
-        deviceManager.addCommand(imei, commandId, command);
-        
-        const response = await commandManager.sendCommand(imei, command);
-        deviceManager.updateCommandResponse(imei, commandId, response.response || '', response.success, response.error);
-        
-        sendJson({ success: true, commandId, response });
-        return;
-      }
-
-      // GET /api/stats - Get statistics
-      if (url.pathname === '/api/stats' && req.method === 'GET') {
-        sendJson({ success: true, stats: deviceManager.getStats() });
-        return;
-      }
-
-      // GET /api/logs - Get logs
-      if (url.pathname === '/api/logs' && req.method === 'GET') {
-        const limit = parseInt(url.searchParams.get('limit') || '100');
-        const level = url.searchParams.get('level') as LogEntry['level'] | undefined;
-        sendJson({ success: true, logs: deviceManager.getLogs(limit, level) });
-        return;
-      }
-
-      // DELETE /api/logs - Clear logs
-      if (url.pathname === '/api/logs' && req.method === 'DELETE') {
-        deviceManager.clearLogs();
-        sendJson({ success: true });
-        return;
-      }
-
-      // 404 for unknown API routes
       sendJson({ success: false, error: 'Not found' }, 404);
-      
-    } catch (error) {
-      deviceManager.log('error', 'WebAPI', 'API Error', error);
+    } catch (error: any) {
       sendJson({ success: false, error: 'Internal server error' }, 500);
     }
   }
 
-  /**
-   * Serve static files
-   */
-  private serveStaticFile(req: IncomingMessage, res: ServerResponse, url: URL): void {
-    let filePath = url.pathname === '/' ? '/index.html' : url.pathname;
-    
-    // Serve embedded HTML for simplicity
-    if (filePath === '/index.html') {
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end(this.getIndexHtml());
-      return;
+  private verifyToken(req: IncomingMessage): { valid: boolean; user?: string; error?: string } {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return { valid: false, error: 'No token provided' };
     }
-
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('Not Found');
+    
+    try {
+      const decoded = jwt.verify(authHeader.substring(7), this.jwtSecret) as any;
+      return { valid: true, user: decoded.user };
+    } catch (e) {
+      return { valid: false, error: 'Invalid token' };
+    }
   }
 
-  /**
-   * Read request body
-   */
   private readBody(req: IncomingMessage): Promise<string> {
     return new Promise((resolve, reject) => {
       let body = '';
@@ -476,9 +328,16 @@ export class WebApiServer {
     });
   }
 
-  /**
-   * Get embedded HTML for web interface
-   */
+  private serveStaticFile(req: IncomingMessage, res: ServerResponse, url: URL): void {
+    if (url.pathname === '/' || url.pathname === '/index.html') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(this.getIndexHtml());
+      return;
+    }
+    res.writeHead(404);
+    res.end('Not Found');
+  }
+
   private getIndexHtml(): string {
     return `<!DOCTYPE html>
 <html lang="en">
@@ -486,623 +345,308 @@ export class WebApiServer {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Teltonika Device Manager</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #eee; }
-    .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
-    header { background: #16213e; padding: 20px; margin-bottom: 20px; border-radius: 10px; display: flex; justify-content: space-between; align-items: center; }
-    header h1 { color: #00d9ff; }
-    .status { display: flex; gap: 20px; }
-    .status-item { text-align: center; }
-    .status-item .value { font-size: 24px; font-weight: bold; color: #00d9ff; }
-    .status-item .label { font-size: 12px; color: #888; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
-    .panel { background: #16213e; border-radius: 10px; padding: 20px; }
-    .panel h2 { color: #00d9ff; margin-bottom: 15px; font-size: 18px; border-bottom: 1px solid #333; padding-bottom: 10px; }
-    .device-list { max-height: 300px; overflow-y: auto; }
-    .device { background: #0f3460; padding: 15px; border-radius: 8px; margin-bottom: 10px; cursor: pointer; transition: all 0.2s; }
-    .device:hover { background: #1a4a7a; }
-    .device.selected { border: 2px solid #00d9ff; }
-    .device-header { display: flex; justify-content: space-between; align-items: center; }
-    .device-imei { font-weight: bold; font-size: 16px; }
-    .device-status { padding: 3px 10px; border-radius: 20px; font-size: 12px; }
-    .device-status.online { background: #00c853; color: #000; }
-    .device-status.offline { background: #ff5252; color: #fff; }
-    .device-info { margin-top: 10px; font-size: 13px; color: #aaa; }
-    .device-position { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin-top: 8px; }
-    .device-position span { background: #1a1a2e; padding: 5px; border-radius: 4px; text-align: center; }
-    .command-panel { margin-top: 20px; }
-    .command-input { display: flex; gap: 10px; }
-    .command-input input { flex: 1; padding: 12px; border: none; border-radius: 8px; background: #0f3460; color: #fff; font-size: 14px; }
-    .command-input input:focus { outline: 2px solid #00d9ff; }
-    .command-input button { padding: 12px 24px; border: none; border-radius: 8px; background: #00d9ff; color: #000; font-weight: bold; cursor: pointer; transition: all 0.2s; }
-    .command-input button:hover { background: #00b8d4; }
-    .command-input button:disabled { background: #555; cursor: not-allowed; }
-    .quick-commands { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-    .quick-commands button { padding: 8px 12px; border: 1px solid #00d9ff; border-radius: 6px; background: transparent; color: #00d9ff; cursor: pointer; font-size: 12px; }
-    .quick-commands button:hover { background: #00d9ff; color: #000; }
-    .command-history { max-height: 200px; overflow-y: auto; margin-top: 15px; }
-    .cmd-entry { padding: 10px; background: #0f3460; border-radius: 6px; margin-bottom: 8px; font-size: 13px; }
-    .cmd-entry .cmd { color: #00d9ff; }
-    .cmd-entry .response { color: #4caf50; margin-top: 5px; word-break: break-all; }
-    .cmd-entry .error { color: #ff5252; }
-    .cmd-entry .time { color: #666; font-size: 11px; }
-    .logs-panel { margin-top: 20px; }
-    .logs-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-    .logs-filter { display: flex; gap: 8px; }
-    .logs-filter button { padding: 5px 12px; border: 1px solid #444; border-radius: 4px; background: transparent; color: #aaa; cursor: pointer; font-size: 12px; }
-    .logs-filter button.active { background: #00d9ff; color: #000; border-color: #00d9ff; }
-    .logs-container { max-height: 300px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 12px; background: #0a0a15; border-radius: 8px; padding: 10px; }
-    .log-entry { padding: 4px 0; border-bottom: 1px solid #1a1a2e; }
-    .log-entry .time { color: #666; }
-    .log-entry .level { padding: 2px 6px; border-radius: 3px; margin: 0 8px; font-size: 10px; }
-    .log-entry .level.info { background: #2196f3; }
-    .log-entry .level.warn { background: #ff9800; color: #000; }
-    .log-entry .level.error { background: #f44336; }
-    .log-entry .level.debug { background: #9c27b0; }
-    .log-entry .source { color: #00d9ff; }
-    .log-entry .message { color: #ddd; }
-    .connection-status { display: flex; align-items: center; gap: 8px; }
-    .connection-dot { width: 10px; height: 10px; border-radius: 50%; }
-    .connection-dot.connected { background: #00c853; }
-    .connection-dot.disconnected { background: #ff5252; }
-    .no-device { text-align: center; padding: 40px; color: #666; }
-    .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
-    .tab { padding: 10px 20px; border: 1px solid #333; border-radius: 8px; background: transparent; color: #aaa; cursor: pointer; font-size: 14px; }
-    .tab.active { background: #00d9ff; color: #000; border-color: #00d9ff; }
-    .tab-content { display: none; }
-    .tab-content.active { display: block; }
-    .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
-    .settings-section { background: #0f3460; padding: 20px; border-radius: 8px; }
-    .settings-section h3 { color: #00d9ff; margin-bottom: 15px; font-size: 16px; border-bottom: 1px solid #333; padding-bottom: 8px; }
-    .setting-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #1a1a2e; }
-    .setting-row:last-child { border-bottom: none; }
-    .setting-label { color: #ddd; font-size: 14px; }
-    .setting-desc { color: #666; font-size: 12px; margin-top: 2px; }
-    .toggle { position: relative; width: 50px; height: 26px; }
-    .toggle input { opacity: 0; width: 0; height: 0; }
-    .toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #555; border-radius: 26px; transition: 0.3s; }
-    .toggle-slider:before { position: absolute; content: ""; height: 20px; width: 20px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.3s; }
-    .toggle input:checked + .toggle-slider { background: #00d9ff; }
-    .toggle input:checked + .toggle-slider:before { transform: translateX(24px); }
-    .input-field { padding: 8px 12px; border: 1px solid #333; border-radius: 6px; background: #1a1a2e; color: #fff; font-size: 14px; width: 150px; }
-    .input-field:focus { outline: 2px solid #00d9ff; border-color: transparent; }
-    .list-manager { margin-top: 15px; }
-    .list-items { max-height: 150px; overflow-y: auto; background: #1a1a2e; border-radius: 6px; padding: 10px; margin-bottom: 10px; }
-    .list-item { display: flex; justify-content: space-between; align-items: center; padding: 8px; background: #0f3460; border-radius: 4px; margin-bottom: 5px; }
-    .list-item:last-child { margin-bottom: 0; }
-    .list-item button { background: #f44336; border: none; color: white; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
-    .list-add { display: flex; gap: 8px; }
-    .list-add input { flex: 1; padding: 8px; border: 1px solid #333; border-radius: 6px; background: #1a1a2e; color: #fff; }
-    .list-add button { padding: 8px 16px; background: #00d9ff; border: none; border-radius: 6px; color: #000; cursor: pointer; font-weight: bold; }
-    .api-key-display { display: flex; gap: 10px; align-items: center; }
-    .api-key-display input { flex: 1; }
-    .btn-secondary { padding: 8px 12px; background: #333; border: none; border-radius: 6px; color: #fff; cursor: pointer; font-size: 12px; }
-    .btn-secondary:hover { background: #444; }
-    .btn-danger { background: #f44336; }
-    .btn-danger:hover { background: #d32f2f; }
-    .save-status { padding: 10px; border-radius: 6px; margin-top: 15px; text-align: center; display: none; }
-    .save-status.success { display: block; background: #1b5e20; color: #4caf50; }
-    .save-status.error { display: block; background: #b71c1c; color: #ff5252; }
-    .security-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px; }
-    .security-stat { background: #0f3460; padding: 15px; border-radius: 8px; text-align: center; }
-    .security-stat .value { font-size: 24px; font-weight: bold; color: #00d9ff; }
-    .security-stat .label { font-size: 12px; color: #888; margin-top: 5px; }
+    .loader { border: 3px solid #1e293b; border-top: 3px solid #06b6d4; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; display: inline-block; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    #map { height: 400px; border-radius: 0.5rem; }
+    .device-marker { background: #06b6d4; border: 3px solid white; border-radius: 50%; width: 16px; height: 16px; box-shadow: 0 2px 4px rgba(0,0,0,0.3); }
+    .device-marker.offline { background: #ef4444; }
   </style>
 </head>
-<body>
-  <div class="container">
-    <header>
-      <h1>🛰️ Teltonika Device Manager</h1>
-      <div class="status">
-        <div class="status-item">
-          <div class="value" id="stat-online">0</div>
-          <div class="label">Online</div>
-        </div>
-        <div class="status-item">
-          <div class="value" id="stat-total">0</div>
-          <div class="label">Total</div>
-        </div>
-        <div class="status-item">
-          <div class="value" id="stat-messages">0</div>
-          <div class="label">Messages</div>
-        </div>
-        <div class="connection-status">
-          <div class="connection-dot" id="ws-status"></div>
-          <span id="ws-text">Connecting...</span>
+<body class="bg-slate-900 text-white min-h-screen">
+  <!-- Login -->
+  <div id="login-screen" class="min-h-screen flex items-center justify-center">
+    <div class="bg-slate-800 p-8 rounded-xl shadow-2xl w-full max-w-md">
+      <h1 class="text-3xl font-bold text-cyan-400 text-center mb-8">🛰️ Teltonika Manager</h1>
+      <form id="login-form" class="space-y-4">
+        <input type="text" id="login-user" class="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded-lg" placeholder="Username" required>
+        <input type="password" id="login-pass" class="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded-lg" placeholder="Password" required>
+        <div id="login-error" class="text-red-400 text-sm hidden"></div>
+        <button type="submit" class="w-full py-3 bg-cyan-600 hover:bg-cyan-700 rounded-lg font-semibold">Sign In</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Dashboard -->
+  <div id="dashboard" class="hidden">
+    <header class="bg-slate-800 border-b border-slate-700 px-6 py-4">
+      <div class="max-w-7xl mx-auto flex justify-between items-center">
+        <h1 class="text-2xl font-bold text-cyan-400">🛰️ Teltonika Manager</h1>
+        <div class="flex items-center gap-6">
+          <div class="flex gap-4">
+            <div class="text-center"><div id="stat-online" class="text-xl font-bold text-green-400">0</div><div class="text-xs text-slate-400">Online</div></div>
+            <div class="text-center"><div id="stat-total" class="text-xl font-bold text-cyan-400">0</div><div class="text-xs text-slate-400">Total</div></div>
+            <div class="text-center"><div id="stat-messages" class="text-xl font-bold text-purple-400">0</div><div class="text-xs text-slate-400">Messages</div></div>
+          </div>
+          <div class="flex items-center gap-2">
+            <div id="ws-indicator" class="w-3 h-3 rounded-full bg-red-500"></div>
+            <span id="ws-status" class="text-sm text-slate-400">Connecting...</span>
+          </div>
+          <button id="logout-btn" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm">Logout</button>
         </div>
       </div>
     </header>
 
-    <div class="tabs">
-      <button class="tab active" data-tab="devices">📱 Devices</button>
-      <button class="tab" data-tab="security">🔒 Security</button>
-      <button class="tab" data-tab="logs">📋 Logs</button>
-    </div>
+    <nav class="bg-slate-800 border-b border-slate-700">
+      <div class="max-w-7xl mx-auto px-6 flex gap-1">
+        <button class="tab-btn active px-6 py-3 text-sm font-medium border-b-2 border-cyan-400 text-cyan-400" data-tab="map">📍 Map</button>
+        <button class="tab-btn px-6 py-3 text-sm font-medium border-b-2 border-transparent text-slate-400" data-tab="devices">📱 Devices</button>
+        <button class="tab-btn px-6 py-3 text-sm font-medium border-b-2 border-transparent text-slate-400" data-tab="security">🔒 Security</button>
+        <button class="tab-btn px-6 py-3 text-sm font-medium border-b-2 border-transparent text-slate-400" data-tab="logs">📋 Logs</button>
+      </div>
+    </nav>
 
-    <div id="tab-devices" class="tab-content active">
-      <div class="grid">
-        <div class="panel">
-          <h2>📱 Connected Devices</h2>
-        <div class="device-list" id="device-list">
-          <div class="no-device">No devices connected</div>
+    <main class="max-w-7xl mx-auto p-6">
+      <!-- Map Tab -->
+      <div id="tab-map" class="tab-content">
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div class="lg:col-span-2 bg-slate-800 rounded-xl p-4">
+            <h2 class="text-lg font-semibold mb-4">📍 Device Locations</h2>
+            <div id="map"></div>
+          </div>
+          <div class="bg-slate-800 rounded-xl p-4">
+            <h2 class="text-lg font-semibold mb-4">📱 Online Devices</h2>
+            <div id="map-device-list" class="space-y-2 max-h-96 overflow-y-auto"></div>
+          </div>
         </div>
       </div>
 
-      <div class="panel">
-        <h2>📍 Device Details</h2>
-        <div id="device-details">
-          <div class="no-device">Select a device to view details</div>
-        </div>
-        
-        <div class="command-panel" id="command-panel" style="display: none;">
-          <h3 style="color: #00d9ff; margin-bottom: 10px; font-size: 14px;">Send Command</h3>
-          <div class="command-input">
-            <input type="text" id="command-input" placeholder="Enter command (e.g., getinfo)" />
-            <button id="send-command">Send</button>
+      <!-- Devices Tab -->
+      <div id="tab-devices" class="tab-content hidden">
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div class="bg-slate-800 rounded-xl p-4">
+            <h2 class="text-lg font-semibold mb-4">📱 Connected Devices</h2>
+            <div id="device-list" class="space-y-2 max-h-[500px] overflow-y-auto"></div>
           </div>
-          <div class="quick-commands">
-            <button data-cmd="getinfo">getinfo</button>
-            <button data-cmd="getver">getver</button>
-            <button data-cmd="getstatus">getstatus</button>
-            <button data-cmd="getgps">getgps</button>
-            <button data-cmd="getio">getio</button>
-            <button data-cmd="getparam 2001">getparam 2001</button>
+          <div class="bg-slate-800 rounded-xl p-4">
+            <h2 class="text-lg font-semibold mb-4">📝 Device Details</h2>
+            <div id="device-details" class="text-slate-400 text-center py-8">Select a device</div>
+            <div id="command-section" class="hidden mt-6 border-t border-slate-700 pt-4">
+              <h3 class="text-md font-semibold mb-3">💬 Send Command</h3>
+              <div class="flex gap-2 mb-3">
+                <input type="text" id="cmd-input" class="flex-1 px-4 py-2 bg-slate-700 border border-slate-600 rounded-lg" placeholder="Enter command...">
+                <button id="cmd-send" class="px-6 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-lg font-medium">Send <span id="cmd-loader" class="loader hidden ml-2"></span></button>
+              </div>
+              <div class="flex flex-wrap gap-2 mb-4">
+                <button class="quick-cmd px-3 py-1 bg-slate-700 hover:bg-slate-600 rounded text-sm" data-cmd="getinfo">getinfo</button>
+                <button class="quick-cmd px-3 py-1 bg-slate-700 hover:bg-slate-600 rounded text-sm" data-cmd="getver">getver</button>
+                <button class="quick-cmd px-3 py-1 bg-slate-700 hover:bg-slate-600 rounded text-sm" data-cmd="getstatus">getstatus</button>
+                <button class="quick-cmd px-3 py-1 bg-slate-700 hover:bg-slate-600 rounded text-sm" data-cmd="getgps">getgps</button>
+              </div>
+              <div id="cmd-history" class="space-y-2 max-h-48 overflow-y-auto"></div>
+            </div>
           </div>
-          <div class="command-history" id="command-history"></div>
         </div>
       </div>
-    </div>
+
+      <!-- Security Tab -->
+      <div id="tab-security" class="tab-content hidden">
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div class="bg-slate-800 rounded-xl p-4">
+            <div class="flex justify-between items-center mb-4">
+              <h2 class="text-lg font-semibold">📋 IMEI Whitelist</h2>
+              <label class="flex items-center gap-2 cursor-pointer">
+                <span class="text-sm text-slate-400">Enabled</span>
+                <input type="checkbox" id="whitelist-enabled" class="sr-only peer">
+                <div class="relative w-11 h-6 bg-slate-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-600"></div>
+              </label>
+            </div>
+            <div class="mb-4">
+              <h3 class="text-sm font-medium text-slate-300 mb-2">Add from connected:</h3>
+              <div id="connected-devices-whitelist" class="flex flex-wrap gap-2"></div>
+            </div>
+            <div id="whitelist-items" class="space-y-2 max-h-64 overflow-y-auto mb-4"></div>
+            <div class="flex gap-2">
+              <input type="text" id="new-imei" class="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-sm" placeholder="Enter IMEI">
+              <button id="add-imei-btn" class="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-lg text-sm">Add</button>
+            </div>
+          </div>
+          <div class="bg-slate-800 rounded-xl p-4">
+            <h2 class="text-lg font-semibold mb-4">⚙️ Settings</h2>
+            <div class="space-y-4">
+              <div class="flex justify-between items-center py-2 border-b border-slate-700">
+                <div><div class="font-medium">Rate Limiting</div><div class="text-sm text-slate-400">Limit requests per IP</div></div>
+                <label class="cursor-pointer"><input type="checkbox" id="rate-limit-enabled" class="sr-only peer"><div class="relative w-11 h-6 bg-slate-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-600"></div></label>
+              </div>
+              <div class="flex justify-between items-center py-2 border-b border-slate-700">
+                <div><div class="font-medium">Max Devices/IP</div></div>
+                <input type="number" id="max-devices-ip" class="w-20 px-3 py-1 bg-slate-700 border border-slate-600 rounded-lg text-center" value="5">
+              </div>
+              <div class="flex justify-between items-center py-2">
+                <div><div class="font-medium">Max Connection Attempts</div></div>
+                <input type="number" id="max-conn-attempts" class="w-20 px-3 py-1 bg-slate-700 border border-slate-600 rounded-lg text-center" value="10">
+              </div>
+            </div>
+            <button id="save-security" class="w-full mt-6 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-lg font-medium">Save Settings</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Logs Tab -->
+      <div id="tab-logs" class="tab-content hidden">
+        <div class="bg-slate-800 rounded-xl p-4">
+          <div class="flex justify-between items-center mb-4">
+            <h2 class="text-lg font-semibold">📋 System Logs</h2>
+            <div class="flex gap-2">
+              <button class="log-filter active px-3 py-1 bg-cyan-600 rounded text-sm" data-level="all">All</button>
+              <button class="log-filter px-3 py-1 bg-slate-700 rounded text-sm" data-level="info">Info</button>
+              <button class="log-filter px-3 py-1 bg-slate-700 rounded text-sm" data-level="warn">Warn</button>
+              <button class="log-filter px-3 py-1 bg-slate-700 rounded text-sm" data-level="error">Error</button>
+              <button id="clear-logs" class="px-3 py-1 bg-red-600 rounded text-sm">Clear</button>
+            </div>
+          </div>
+          <div id="logs-container" class="font-mono text-sm bg-slate-900 rounded-lg p-4 h-[500px] overflow-y-auto"></div>
+        </div>
+      </div>
+    </main>
   </div>
 
-  <div id="tab-security" class="tab-content">
-    <div class="security-stats">
-      <div class="security-stat">
-        <div class="value" id="sec-blocked">0</div>
-        <div class="label">Blocked IPs</div>
-      </div>
-      <div class="security-stat">
-        <div class="value" id="sec-whitelist">0</div>
-        <div class="label">IMEI Whitelist</div>
-      </div>
-      <div class="security-stat">
-        <div class="value" id="sec-connections">0</div>
-        <div class="label">Active Connections</div>
-      </div>
-      <div class="security-stat">
-        <div class="value" id="sec-rejected">0</div>
-        <div class="label">Rejected Today</div>
-      </div>
-    </div>
-
-    <div class="settings-grid">
-      <div class="settings-section">
-        <h3>🔑 API Authentication</h3>
-        <div class="setting-row">
-          <div>
-            <div class="setting-label">Enable API Key</div>
-            <div class="setting-desc">Require API key for protected endpoints</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="cfg-apiKeyEnabled">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <div class="api-key-display" style="margin-top: 15px;">
-          <input type="text" class="input-field" id="cfg-apiKey" placeholder="API Key" style="width: 100%;" readonly>
-          <button class="btn-secondary" onclick="copyApiKey()">Copy</button>
-          <button class="btn-secondary btn-danger" onclick="regenerateApiKey()">Regenerate</button>
-        </div>
-      </div>
-
-      <div class="settings-section">
-        <h3>📋 IMEI Whitelist</h3>
-        <div class="setting-row">
-          <div>
-            <div class="setting-label">Enable IMEI Whitelist</div>
-            <div class="setting-desc">Only allow whitelisted IMEI numbers</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="cfg-imeiWhitelistEnabled">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <div class="list-manager">
-          <div class="list-items" id="imei-whitelist"></div>
-          <div class="list-add">
-            <input type="text" id="new-imei" placeholder="Enter IMEI (15 digits)">
-            <button onclick="addImeiToWhitelist()">Add</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="settings-section">
-        <h3>⏱️ Rate Limiting</h3>
-        <div class="setting-row">
-          <div>
-            <div class="setting-label">Enable Rate Limiting</div>
-            <div class="setting-desc">Limit requests per IP address</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="cfg-rateLimitEnabled">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <div class="setting-row">
-          <div>
-            <div class="setting-label">Window (ms)</div>
-            <div class="setting-desc">Time window for rate limiting</div>
-          </div>
-          <input type="number" class="input-field" id="cfg-rateLimitWindow" min="1000" step="1000">
-        </div>
-        <div class="setting-row">
-          <div>
-            <div class="setting-label">Max Requests</div>
-            <div class="setting-desc">Max requests per window</div>
-          </div>
-          <input type="number" class="input-field" id="cfg-rateLimitMaxRequests" min="1">
-        </div>
-      </div>
-
-      <div class="settings-section">
-        <h3>🌐 IP Restrictions</h3>
-        <div class="setting-row">
-          <div>
-            <div class="setting-label">Enable IP Whitelist</div>
-            <div class="setting-desc">Only allow whitelisted IPs</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="cfg-ipWhitelistEnabled">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <div class="setting-row">
-          <div>
-            <div class="setting-label">Max Devices per IP</div>
-            <div class="setting-desc">Limit connections from same IP</div>
-          </div>
-          <input type="number" class="input-field" id="cfg-maxDevicesPerIp" min="1">
-        </div>
-        <div class="setting-row">
-          <div>
-            <div class="setting-label">Max Connection Attempts</div>
-            <div class="setting-desc">Before auto-blocking IP</div>
-          </div>
-          <input type="number" class="input-field" id="cfg-maxConnectionAttempts" min="1">
-        </div>
-      </div>
-
-      <div class="settings-section">
-        <h3>🛡️ IP Whitelist</h3>
-        <div class="list-manager">
-          <div class="list-items" id="ip-whitelist"></div>
-          <div class="list-add">
-            <input type="text" id="new-ip-whitelist" placeholder="Enter IP address">
-            <button onclick="addIpToWhitelist()">Add</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="settings-section">
-        <h3>🚫 Blocked IPs</h3>
-        <div class="list-manager">
-          <div class="list-items" id="blocked-ips"></div>
-          <div class="list-add">
-            <input type="text" id="new-blocked-ip" placeholder="Enter IP to block">
-            <button onclick="blockIp()">Block</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="save-status" id="save-status"></div>
-    <div style="margin-top: 20px; text-align: center;">
-      <button class="command-input button" style="padding: 12px 40px; background: #00d9ff; border: none; border-radius: 8px; color: #000; font-weight: bold; cursor: pointer; font-size: 16px;" onclick="saveSecurityConfig()">💾 Save All Settings</button>
-    </div>
-  </div>
-
-    <div id="tab-logs" class="tab-content">
-    <div class="panel logs-panel">
-      <div class="logs-header">
-        <h2>📋 System Logs</h2>
-        <div class="logs-filter">
-          <button class="active" data-level="all">All</button>
-          <button data-level="info">Info</button>
-          <button data-level="warn">Warn</button>
-          <button data-level="error">Error</button>
-          <button id="clear-logs" style="background: #f44336; color: #fff; border-color: #f44336;">Clear</button>
-        </div>
-      </div>
-      <div class="logs-container" id="logs-container"></div>
-    </div>
-  </div>
-  </div>
+  <!-- Toasts -->
+  <div id="toasts" class="fixed bottom-4 right-4 space-y-2 z-50"></div>
 
   <script>
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = wsProtocol + '//' + window.location.host;
-    let ws;
+    let token = localStorage.getItem('token');
+    let ws = null;
     let devices = {};
     let selectedImei = null;
+    let map = null;
+    let markers = {};
     let logFilter = 'all';
     let securityConfig = {};
+    let pendingCommand = null;
 
-    function connect() {
-      ws = new WebSocket(wsUrl);
-      
-      ws.onopen = () => {
-        document.getElementById('ws-status').className = 'connection-dot connected';
-        document.getElementById('ws-text').textContent = 'Connected';
-        loadSecurityConfig();
-      };
+    if (token) verifyToken();
 
-      ws.onclose = () => {
-        document.getElementById('ws-status').className = 'connection-dot disconnected';
-        document.getElementById('ws-text').textContent = 'Disconnected';
-        setTimeout(connect, 3000);
-      };
-
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        handleMessage(msg);
-      };
-    }
-
-    async function loadSecurityConfig() {
-      try {
-        const res = await fetch('/api/security/config');
-        const data = await res.json();
-        if (data.success) {
-          securityConfig = data.config;
-          renderSecurityConfig();
-        }
-        
-        const secRes = await fetch('/api/security');
-        const secData = await secRes.json();
-        if (secData.success) {
-          document.getElementById('sec-blocked').textContent = secData.security.blockedIps;
-          document.getElementById('sec-whitelist').textContent = secData.security.imeiWhitelistCount;
-          document.getElementById('sec-connections').textContent = secData.security.activeConnections || 0;
-          document.getElementById('sec-rejected').textContent = secData.security.rejectedToday || 0;
-        }
-        
-        const blockedRes = await fetch('/api/security/blocked');
-        const blockedData = await blockedRes.json();
-        if (blockedData.success) {
-          renderBlockedIps(blockedData.blockedIps);
-        }
-      } catch (e) {
-        console.error('Failed to load security config:', e);
-      }
-    }
-
-    function renderSecurityConfig() {
-      document.getElementById('cfg-apiKeyEnabled').checked = securityConfig.apiKeyEnabled;
-      document.getElementById('cfg-apiKey').value = securityConfig.apiKey || '';
-      document.getElementById('cfg-imeiWhitelistEnabled').checked = securityConfig.imeiWhitelistEnabled;
-      document.getElementById('cfg-rateLimitEnabled').checked = securityConfig.rateLimitEnabled;
-      document.getElementById('cfg-rateLimitWindow').value = securityConfig.rateLimitWindow || 60000;
-      document.getElementById('cfg-rateLimitMaxRequests').value = securityConfig.rateLimitMaxRequests || 100;
-      document.getElementById('cfg-ipWhitelistEnabled').checked = securityConfig.ipWhitelistEnabled;
-      document.getElementById('cfg-maxDevicesPerIp').value = securityConfig.maxDevicesPerIp || 5;
-      document.getElementById('cfg-maxConnectionAttempts').value = securityConfig.maxConnectionAttempts || 10;
-      
-      renderImeiWhitelist(securityConfig.imeiWhitelist || []);
-      renderIpWhitelist(securityConfig.ipWhitelist || []);
-    }
-
-    function renderImeiWhitelist(list) {
-      const container = document.getElementById('imei-whitelist');
-      if (list.length === 0) {
-        container.innerHTML = '<div style="color: #666; text-align: center; padding: 10px;">No IMEIs in whitelist</div>';
-        return;
-      }
-      container.innerHTML = list.map(imei => \`
-        <div class="list-item">
-          <span>\${imei}</span>
-          <button onclick="removeImeiFromWhitelist('\${imei}')">Remove</button>
-        </div>
-      \`).join('');
-    }
-
-    function renderIpWhitelist(list) {
-      const container = document.getElementById('ip-whitelist');
-      if (list.length === 0) {
-        container.innerHTML = '<div style="color: #666; text-align: center; padding: 10px;">No IPs in whitelist</div>';
-        return;
-      }
-      container.innerHTML = list.map(ip => \`
-        <div class="list-item">
-          <span>\${ip}</span>
-          <button onclick="removeIpFromWhitelist('\${ip}')">Remove</button>
-        </div>
-      \`).join('');
-    }
-
-    function renderBlockedIps(list) {
-      const container = document.getElementById('blocked-ips');
-      if (list.length === 0) {
-        container.innerHTML = '<div style="color: #666; text-align: center; padding: 10px;">No blocked IPs</div>';
-        return;
-      }
-      container.innerHTML = list.map(ip => \`
-        <div class="list-item">
-          <span>\${ip}</span>
-          <button onclick="unblockIp('\${ip}')">Unblock</button>
-        </div>
-      \`).join('');
-    }
-
-    async function saveSecurityConfig() {
-      const config = {
-        apiKeyEnabled: document.getElementById('cfg-apiKeyEnabled').checked,
-        imeiWhitelistEnabled: document.getElementById('cfg-imeiWhitelistEnabled').checked,
-        rateLimitEnabled: document.getElementById('cfg-rateLimitEnabled').checked,
-        rateLimitWindow: parseInt(document.getElementById('cfg-rateLimitWindow').value),
-        rateLimitMaxRequests: parseInt(document.getElementById('cfg-rateLimitMaxRequests').value),
-        ipWhitelistEnabled: document.getElementById('cfg-ipWhitelistEnabled').checked,
-        maxDevicesPerIp: parseInt(document.getElementById('cfg-maxDevicesPerIp').value),
-        maxConnectionAttempts: parseInt(document.getElementById('cfg-maxConnectionAttempts').value),
-      };
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const user = document.getElementById('login-user').value;
+      const pass = document.getElementById('login-pass').value;
       
       try {
-        const res = await fetch('/api/security/config', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(config)
-        });
-        const data = await res.json();
-        showSaveStatus(data.success, data.success ? 'Configuration saved!' : data.error);
-      } catch (e) {
-        showSaveStatus(false, 'Failed to save configuration');
-      }
-    }
-
-    function showSaveStatus(success, message) {
-      const el = document.getElementById('save-status');
-      el.className = 'save-status ' + (success ? 'success' : 'error');
-      el.textContent = message;
-      setTimeout(() => { el.className = 'save-status'; }, 3000);
-    }
-
-    async function addImeiToWhitelist() {
-      const input = document.getElementById('new-imei');
-      const imei = input.value.trim();
-      if (!imei || imei.length !== 15) {
-        alert('Please enter a valid 15-digit IMEI');
-        return;
-      }
-      try {
-        await fetch('/api/security/whitelist', {
+        const res = await fetch('/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ imei })
+          body: JSON.stringify({ username: user, password: pass })
         });
-        input.value = '';
-        loadSecurityConfig();
-      } catch (e) {
-        alert('Failed to add IMEI');
-      }
-    }
-
-    async function removeImeiFromWhitelist(imei) {
-      try {
-        await fetch('/api/security/whitelist/' + imei, { method: 'DELETE' });
-        loadSecurityConfig();
-      } catch (e) {
-        alert('Failed to remove IMEI');
-      }
-    }
-
-    function addIpToWhitelist() {
-      const input = document.getElementById('new-ip-whitelist');
-      const ip = input.value.trim();
-      if (!ip) return;
-      securityConfig.ipWhitelist = securityConfig.ipWhitelist || [];
-      if (!securityConfig.ipWhitelist.includes(ip)) {
-        securityConfig.ipWhitelist.push(ip);
-        renderIpWhitelist(securityConfig.ipWhitelist);
-        input.value = '';
-      }
-    }
-
-    function removeIpFromWhitelist(ip) {
-      securityConfig.ipWhitelist = (securityConfig.ipWhitelist || []).filter(i => i !== ip);
-      renderIpWhitelist(securityConfig.ipWhitelist);
-    }
-
-    async function blockIp() {
-      const input = document.getElementById('new-blocked-ip');
-      const ip = input.value.trim();
-      if (!ip) return;
-      try {
-        await fetch('/api/security/block', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ip, duration: 3600000 })
-        });
-        input.value = '';
-        loadSecurityConfig();
-      } catch (e) {
-        alert('Failed to block IP');
-      }
-    }
-
-    async function unblockIp(ip) {
-      try {
-        await fetch('/api/security/block/' + encodeURIComponent(ip), { method: 'DELETE' });
-        loadSecurityConfig();
-      } catch (e) {
-        alert('Failed to unblock IP');
-      }
-    }
-
-    function copyApiKey() {
-      const input = document.getElementById('cfg-apiKey');
-      navigator.clipboard.writeText(input.value);
-      alert('API Key copied to clipboard');
-    }
-
-    async function regenerateApiKey() {
-      if (!confirm('Are you sure you want to regenerate the API key? This will invalidate the current key.')) return;
-      try {
-        const res = await fetch('/api/security/config/regenerate-key', { method: 'POST' });
         const data = await res.json();
+        
         if (data.success) {
-          document.getElementById('cfg-apiKey').value = data.apiKey;
-          alert('New API Key generated. Please save it securely!');
+          token = data.token;
+          localStorage.setItem('token', token);
+          showDashboard();
+        } else {
+          document.getElementById('login-error').textContent = data.error;
+          document.getElementById('login-error').classList.remove('hidden');
         }
       } catch (e) {
-        alert('Failed to regenerate API key');
+        document.getElementById('login-error').textContent = 'Connection error';
+        document.getElementById('login-error').classList.remove('hidden');
       }
-    }
-
-    // Tab navigation
-    document.querySelectorAll('.tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-        tab.classList.add('active');
-        document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
-        if (tab.dataset.tab === 'security') loadSecurityConfig();
-      });
     });
 
-    function handleMessage(msg) {
+    async function verifyToken() {
+      try {
+        const res = await fetch('/api/auth/verify', { headers: { 'Authorization': 'Bearer ' + token } });
+        const data = await res.json();
+        if (data.success) showDashboard();
+        else logout();
+      } catch (e) { logout(); }
+    }
+
+    function showDashboard() {
+      document.getElementById('login-screen').classList.add('hidden');
+      document.getElementById('dashboard').classList.remove('hidden');
+      initMap();
+      connectWebSocket();
+    }
+
+    function logout() {
+      token = null;
+      localStorage.removeItem('token');
+      document.getElementById('login-screen').classList.remove('hidden');
+      document.getElementById('dashboard').classList.add('hidden');
+      if (ws) ws.close();
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', logout);
+
+    function initMap() {
+      if (map) return;
+      map = L.map('map').setView([-12.0464, -77.0428], 12);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap'
+      }).addTo(map);
+    }
+
+    function connectWebSocket() {
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(wsProtocol + '//' + window.location.host);
+      
+      ws.onopen = () => {
+        document.getElementById('ws-indicator').className = 'w-3 h-3 rounded-full bg-yellow-500';
+        document.getElementById('ws-status').textContent = 'Authenticating...';
+        ws.send(JSON.stringify({ type: 'auth', token }));
+      };
+      
+      ws.onclose = () => {
+        document.getElementById('ws-indicator').className = 'w-3 h-3 rounded-full bg-red-500';
+        document.getElementById('ws-status').textContent = 'Disconnected';
+        setTimeout(connectWebSocket, 3000);
+      };
+      
+      ws.onmessage = (e) => handleWsMessage(JSON.parse(e.data));
+    }
+
+    function handleWsMessage(msg) {
       switch (msg.type) {
+        case 'authSuccess':
+          document.getElementById('ws-indicator').className = 'w-3 h-3 rounded-full bg-green-500';
+          document.getElementById('ws-status').textContent = 'Connected';
+          break;
+        case 'authError': logout(); break;
         case 'init':
-          msg.data.devices.forEach(d => devices[d.imei] = d);
+          msg.data.devices.forEach(d => { devices[d.imei] = d; updateMarker(d); });
           updateStats(msg.data.stats);
           renderDevices();
-          msg.data.logs.reverse().forEach(log => addLog(log));
+          msg.data.logs.forEach(addLog);
           break;
         case 'deviceConnected':
         case 'positionUpdate':
           devices[msg.data.imei] = msg.data;
+          updateMarker(msg.data);
           renderDevices();
-          if (selectedImei === msg.data.imei) renderDeviceDetails(msg.data);
+          if (selectedImei === msg.data.imei) renderDetails(msg.data);
           break;
         case 'deviceDisconnected':
-          if (devices[msg.data.imei]) devices[msg.data.imei].status = 'offline';
+          if (devices[msg.data.imei]) { devices[msg.data.imei].status = 'offline'; updateMarker(devices[msg.data.imei]); }
           renderDevices();
           break;
-        case 'commandResponse':
-          if (selectedImei === msg.data.imei) {
-            const device = devices[msg.data.imei];
-            if (device) renderCommandHistory(device.commandHistory);
-          }
-          break;
-        case 'stats':
-          updateStats(msg.data);
-          break;
-        case 'log':
-          addLog(msg.data);
-          break;
-        case 'logsCleared':
-          document.getElementById('logs-container').innerHTML = '';
-          break;
+        case 'commandResponse': handleCommandResponse(msg); break;
+        case 'commandError': handleCommandError(msg); break;
+        case 'stats': updateStats(msg.data); break;
+        case 'log': addLog(msg.data); break;
+        case 'logsCleared': document.getElementById('logs-container').innerHTML = ''; break;
+        case 'whitelistUpdated': renderWhitelist(msg.whitelist); break;
+        case 'securityConfigUpdated': securityConfig = msg.data; renderSecurityConfig(); break;
       }
+    }
+
+    function updateMarker(device) {
+      if (!device.lastPosition?.lat) return;
+      const { lat, lng } = device.lastPosition;
+      
+      const icon = L.divIcon({ className: 'device-marker ' + (device.status === 'offline' ? 'offline' : ''), iconSize: [16, 16], iconAnchor: [8, 8] });
+      
+      if (markers[device.imei]) {
+        markers[device.imei].setLatLng([lat, lng]).setIcon(icon);
+      } else {
+        markers[device.imei] = L.marker([lat, lng], { icon }).addTo(map);
+      }
+      
+      markers[device.imei].bindPopup(\`<b>\${device.imei}</b><br>Speed: \${device.lastPosition.speed} km/h<br>Sats: \${device.lastPosition.satellites}\`);
     }
 
     function updateStats(stats) {
@@ -1112,145 +656,161 @@ export class WebApiServer {
     }
 
     function renderDevices() {
-      const list = document.getElementById('device-list');
-      const deviceArray = Object.values(devices);
+      const arr = Object.values(devices);
+      document.getElementById('device-list').innerHTML = arr.length === 0 ? '<div class="text-slate-400 text-center py-8">No devices</div>' :
+        arr.map(d => \`<div class="p-3 bg-slate-700 hover:bg-slate-600 rounded-lg cursor-pointer \${selectedImei === d.imei ? 'ring-2 ring-cyan-400' : ''}" onclick="selectDevice('\${d.imei}')">
+          <div class="flex justify-between"><span class="font-mono">\${d.imei}</span><span class="px-2 py-1 rounded text-xs \${d.status === 'online' ? 'bg-green-600' : 'bg-red-600'}">\${d.status}</span></div>
+          \${d.lastPosition ? \`<div class="text-xs text-slate-400 mt-1">📍 \${d.lastPosition.lat?.toFixed(5)}, \${d.lastPosition.lng?.toFixed(5)} | 🚗 \${d.lastPosition.speed} km/h</div>\` : ''}
+        </div>\`).join('');
       
-      if (deviceArray.length === 0) {
-        list.innerHTML = '<div class="no-device">No devices connected</div>';
-        return;
-      }
-
-      list.innerHTML = deviceArray.map(d => \`
-        <div class="device \${selectedImei === d.imei ? 'selected' : ''}" onclick="selectDevice('\${d.imei}')">
-          <div class="device-header">
-            <span class="device-imei">\${d.imei}</span>
-            <span class="device-status \${d.status}">\${d.status}</span>
-          </div>
-          <div class="device-info">
-            Messages: \${d.messageCount} | Last seen: \${new Date(d.lastSeen).toLocaleTimeString()}
-          </div>
-          \${d.lastPosition ? \`
-            <div class="device-position">
-              <span>📍 \${d.lastPosition.lat.toFixed(5)}, \${d.lastPosition.lng.toFixed(5)}</span>
-              <span>🚗 \${d.lastPosition.speed} km/h</span>
-              <span>🛰️ \${d.lastPosition.satellites} sats</span>
-            </div>
-          \` : ''}
-        </div>
-      \`).join('');
+      document.getElementById('map-device-list').innerHTML = arr.filter(d => d.status === 'online').map(d => \`<div class="p-2 bg-slate-700 rounded cursor-pointer hover:bg-slate-600 text-sm" onclick="focusDevice('\${d.imei}')"><div class="font-mono">\${d.imei}</div></div>\`).join('') || '<div class="text-slate-400 text-sm">No online devices</div>';
+      
+      renderConnectedForWhitelist();
     }
 
     function selectDevice(imei) {
       selectedImei = imei;
       renderDevices();
-      const device = devices[imei];
-      if (device) {
-        renderDeviceDetails(device);
-        document.getElementById('command-panel').style.display = 'block';
-      }
+      renderDetails(devices[imei]);
+      document.getElementById('command-section').classList.remove('hidden');
     }
 
-    function renderDeviceDetails(device) {
-      const details = document.getElementById('device-details');
-      details.innerHTML = \`
-        <div style="background: #0f3460; padding: 15px; border-radius: 8px;">
-          <h3 style="color: #00d9ff; margin-bottom: 10px;">IMEI: \${device.imei}</h3>
-          <p>UUID: \${device.uuid}</p>
-          <p>Status: <span class="device-status \${device.status}">\${device.status}</span></p>
-          <p>Connected: \${new Date(device.connectedAt).toLocaleString()}</p>
-          <p>Last seen: \${new Date(device.lastSeen).toLocaleString()}</p>
-          <p>Messages received: \${device.messageCount}</p>
-          \${device.lastPosition ? \`
-            <h4 style="color: #00d9ff; margin-top: 15px;">Last Position</h4>
-            <p>Coordinates: \${device.lastPosition.lat.toFixed(6)}, \${device.lastPosition.lng.toFixed(6)}</p>
-            <p>Speed: \${device.lastPosition.speed} km/h | Altitude: \${device.lastPosition.altitude}m</p>
-            <p>Angle: \${device.lastPosition.angle}° | Satellites: \${device.lastPosition.satellites}</p>
-            <p>Time: \${new Date(device.lastPosition.timestamp).toLocaleString()}</p>
-          \` : '<p style="color: #666;">No position data yet</p>'}
-        </div>
-      \`;
-      renderCommandHistory(device.commandHistory);
+    function focusDevice(imei) {
+      const d = devices[imei];
+      if (d?.lastPosition) { map.setView([d.lastPosition.lat, d.lastPosition.lng], 16); markers[imei]?.openPopup(); }
     }
 
-    function renderCommandHistory(history) {
-      const container = document.getElementById('command-history');
-      if (!history || history.length === 0) {
-        container.innerHTML = '<p style="color: #666; text-align: center; padding: 20px;">No commands sent yet</p>';
-        return;
-      }
-      container.innerHTML = history.slice(0, 10).map(cmd => \`
-        <div class="cmd-entry">
-          <div class="cmd">› \${cmd.command}</div>
-          \${cmd.response ? \`<div class="response">← \${cmd.response}</div>\` : ''}
-          \${cmd.error ? \`<div class="error">✗ \${cmd.error}</div>\` : ''}
-          <div class="time">\${new Date(cmd.sentAt).toLocaleTimeString()} - \${cmd.status}</div>
-        </div>
-      \`).join('');
+    function renderDetails(d) {
+      if (!d) return;
+      const pos = d.lastPosition;
+      document.getElementById('device-details').innerHTML = \`<div class="space-y-2 text-left">
+        <div class="flex justify-between"><span class="text-slate-400">IMEI</span><span class="font-mono">\${d.imei}</span></div>
+        <div class="flex justify-between"><span class="text-slate-400">Status</span><span class="px-2 py-1 rounded text-xs \${d.status === 'online' ? 'bg-green-600' : 'bg-red-600'}">\${d.status}</span></div>
+        <div class="flex justify-between"><span class="text-slate-400">Messages</span><span>\${d.messageCount}</span></div>
+        \${pos ? \`<div class="border-t border-slate-700 pt-2 mt-2"><div class="text-sm">📍 \${pos.lat?.toFixed(6)}, \${pos.lng?.toFixed(6)}</div><div class="text-sm">🚗 \${pos.speed} km/h | 📡 \${pos.satellites} sats</div></div>\` : ''}
+      </div>\`;
+      renderCmdHistory(d.commandHistory);
     }
+
+    document.getElementById('cmd-send').addEventListener('click', sendCommand);
+    document.getElementById('cmd-input').addEventListener('keypress', (e) => { if (e.key === 'Enter') sendCommand(); });
+    document.querySelectorAll('.quick-cmd').forEach(btn => btn.addEventListener('click', () => { document.getElementById('cmd-input').value = btn.dataset.cmd; sendCommand(); }));
 
     function sendCommand() {
-      if (!selectedImei) return;
-      const input = document.getElementById('command-input');
+      if (!selectedImei || pendingCommand) return;
+      const input = document.getElementById('cmd-input');
       const command = input.value.trim();
       if (!command) return;
       
-      ws.send(JSON.stringify({ type: 'sendCommand', imei: selectedImei, command }));
+      pendingCommand = Date.now().toString();
+      document.getElementById('cmd-loader').classList.remove('hidden');
+      document.getElementById('cmd-send').disabled = true;
+      
+      ws.send(JSON.stringify({ type: 'sendCommand', imei: selectedImei, command, commandId: pendingCommand }));
       input.value = '';
       
-      // Optimistic update
-      const device = devices[selectedImei];
-      if (device) {
-        device.commandHistory = device.commandHistory || [];
-        device.commandHistory.unshift({ command, sentAt: new Date(), status: 'pending' });
-        renderCommandHistory(device.commandHistory);
-      }
+      setTimeout(() => { if (pendingCommand) { pendingCommand = null; document.getElementById('cmd-loader').classList.add('hidden'); document.getElementById('cmd-send').disabled = false; showToast('Command timeout', 'error'); } }, 35000);
     }
+
+    function handleCommandResponse(msg) {
+      pendingCommand = null;
+      document.getElementById('cmd-loader').classList.add('hidden');
+      document.getElementById('cmd-send').disabled = false;
+      showToast(msg.success ? 'Response: ' + (msg.response || 'OK') : 'Failed: ' + msg.error, msg.success ? 'success' : 'error');
+      if (devices[msg.imei]) renderCmdHistory(devices[msg.imei].commandHistory);
+    }
+
+    function handleCommandError(msg) {
+      pendingCommand = null;
+      document.getElementById('cmd-loader').classList.add('hidden');
+      document.getElementById('cmd-send').disabled = false;
+      showToast('Error: ' + msg.error, 'error');
+    }
+
+    function renderCmdHistory(history) {
+      document.getElementById('cmd-history').innerHTML = !history?.length ? '<div class="text-slate-400 text-sm text-center py-4">No commands</div>' :
+        history.slice(0, 10).map(c => \`<div class="p-2 bg-slate-900 rounded text-sm"><div class="text-cyan-400">› \${c.command}</div>\${c.response ? \`<div class="text-green-400 mt-1">← \${c.response}</div>\` : ''}\${c.error ? \`<div class="text-red-400 mt-1">✗ \${c.error}</div>\` : ''}</div>\`).join('');
+    }
+
+    function renderConnectedForWhitelist() {
+      const whitelist = securityConfig.imeiWhitelist || [];
+      const online = Object.values(devices).filter(d => d.status === 'online' && !whitelist.includes(d.imei));
+      document.getElementById('connected-devices-whitelist').innerHTML = online.length === 0 ? '<span class="text-slate-400 text-sm">All whitelisted</span>' :
+        online.map(d => \`<button class="px-3 py-1 bg-green-600 hover:bg-green-700 rounded text-sm" onclick="addToWhitelist('\${d.imei}')">+ \${d.imei}</button>\`).join('');
+    }
+
+    function renderWhitelist(whitelist) {
+      securityConfig.imeiWhitelist = whitelist;
+      document.getElementById('whitelist-items').innerHTML = whitelist.length === 0 ? '<div class="text-slate-400 text-sm text-center py-4">Empty</div>' :
+        whitelist.map(imei => \`<div class="flex justify-between items-center p-2 bg-slate-700 rounded"><span class="font-mono text-sm">\${imei}</span><button class="px-2 py-1 bg-red-600 hover:bg-red-700 rounded text-xs" onclick="removeFromWhitelist('\${imei}')">Remove</button></div>\`).join('');
+      renderConnectedForWhitelist();
+    }
+
+    function addToWhitelist(imei) { ws.send(JSON.stringify({ type: 'addToWhitelist', imei })); showToast('Added: ' + imei, 'success'); }
+    function removeFromWhitelist(imei) { ws.send(JSON.stringify({ type: 'removeFromWhitelist', imei })); }
+
+    document.getElementById('add-imei-btn').addEventListener('click', () => {
+      const imei = document.getElementById('new-imei').value.trim();
+      if (imei.length === 15) { addToWhitelist(imei); document.getElementById('new-imei').value = ''; }
+      else showToast('IMEI must be 15 digits', 'error');
+    });
+
+    function renderSecurityConfig() {
+      document.getElementById('whitelist-enabled').checked = securityConfig.imeiWhitelistEnabled;
+      document.getElementById('rate-limit-enabled').checked = securityConfig.rateLimitEnabled;
+      document.getElementById('max-devices-ip').value = securityConfig.maxDevicesPerIp || 5;
+      document.getElementById('max-conn-attempts').value = securityConfig.maxConnectionAttempts || 10;
+      renderWhitelist(securityConfig.imeiWhitelist || []);
+    }
+
+    document.getElementById('save-security').addEventListener('click', () => {
+      ws.send(JSON.stringify({ type: 'updateSecurityConfig', config: {
+        imeiWhitelistEnabled: document.getElementById('whitelist-enabled').checked,
+        rateLimitEnabled: document.getElementById('rate-limit-enabled').checked,
+        maxDevicesPerIp: parseInt(document.getElementById('max-devices-ip').value),
+        maxConnectionAttempts: parseInt(document.getElementById('max-conn-attempts').value)
+      }}));
+      showToast('Settings saved', 'success');
+    });
 
     function addLog(log) {
       if (logFilter !== 'all' && log.level !== logFilter) return;
-      
+      const colors = { info: 'text-blue-400', warn: 'text-yellow-400', error: 'text-red-400', debug: 'text-purple-400' };
       const container = document.getElementById('logs-container');
       const entry = document.createElement('div');
-      entry.className = 'log-entry';
-      entry.innerHTML = \`
-        <span class="time">\${new Date(log.timestamp).toLocaleTimeString()}</span>
-        <span class="level \${log.level}">\${log.level.toUpperCase()}</span>
-        <span class="source">[\${log.source}]</span>
-        <span class="message">\${log.message}</span>
-      \`;
+      entry.className = 'py-1 border-b border-slate-800';
+      entry.innerHTML = \`<span class="text-slate-500">\${new Date(log.timestamp).toLocaleTimeString()}</span> <span class="\${colors[log.level] || ''} px-2">[\${log.level.toUpperCase()}]</span> <span class="text-cyan-400">[\${log.source}]</span> \${log.message}\`;
       container.appendChild(entry);
       container.scrollTop = container.scrollHeight;
     }
 
-    // Event listeners
-    document.getElementById('send-command').addEventListener('click', sendCommand);
-    document.getElementById('command-input').addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') sendCommand();
-    });
+    document.querySelectorAll('.log-filter').forEach(btn => btn.addEventListener('click', () => {
+      document.querySelectorAll('.log-filter').forEach(b => { b.classList.remove('active', 'bg-cyan-600'); b.classList.add('bg-slate-700'); });
+      btn.classList.add('active', 'bg-cyan-600'); btn.classList.remove('bg-slate-700');
+      logFilter = btn.dataset.level;
+      document.getElementById('logs-container').innerHTML = '';
+      ws.send(JSON.stringify({ type: 'getLogs', limit: 100, level: logFilter === 'all' ? undefined : logFilter }));
+    }));
 
-    document.querySelectorAll('.quick-commands button').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.getElementById('command-input').value = btn.dataset.cmd;
-        sendCommand();
-      });
-    });
+    document.getElementById('clear-logs').addEventListener('click', () => ws.send(JSON.stringify({ type: 'clearLogs' })));
 
-    document.querySelectorAll('.logs-filter button[data-level]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.logs-filter button[data-level]').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        logFilter = btn.dataset.level;
-        document.getElementById('logs-container').innerHTML = '';
-        ws.send(JSON.stringify({ type: 'getLogs', limit: 100, level: logFilter === 'all' ? undefined : logFilter }));
-      });
-    });
+    document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => {
+      document.querySelectorAll('.tab-btn').forEach(b => { b.classList.remove('active', 'border-cyan-400', 'text-cyan-400'); b.classList.add('border-transparent', 'text-slate-400'); });
+      btn.classList.add('active', 'border-cyan-400', 'text-cyan-400'); btn.classList.remove('border-transparent', 'text-slate-400');
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+      document.getElementById('tab-' + btn.dataset.tab).classList.remove('hidden');
+      if (btn.dataset.tab === 'map') setTimeout(() => map?.invalidateSize(), 100);
+      if (btn.dataset.tab === 'security') ws.send(JSON.stringify({ type: 'getSecurityConfig' }));
+    }));
 
-    document.getElementById('clear-logs').addEventListener('click', () => {
-      ws.send(JSON.stringify({ type: 'clearLogs' }));
-    });
-
-    // Start connection
-    connect();
+    function showToast(message, type = 'info') {
+      const colors = { success: 'bg-green-600', error: 'bg-red-600', info: 'bg-blue-600' };
+      const toast = document.createElement('div');
+      toast.className = \`px-4 py-3 rounded-lg shadow-lg \${colors[type]} text-white\`;
+      toast.textContent = message;
+      document.getElementById('toasts').appendChild(toast);
+      setTimeout(() => toast.remove(), 5000);
+    }
   </script>
 </body>
 </html>`;

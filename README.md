@@ -38,11 +38,21 @@ docker-compose up -d
 
 Access the web dashboard at `http://your-server:3000` to:
 
+- � **Login Authentication**: Secure access with username/password
+- 📍 **Live Map**: View device locations on OpenStreetMap
 - 📱 View all connected devices in real-time
-- 📍 Monitor device positions and telemetry
-- 💬 Send commands to devices directly
-- 📋 View system logs
+- 💬 Send commands to devices with loading feedback
+- 📋 View system logs with filters
 - 🔒 Configure security settings
+- ➕ Add connected devices to whitelist directly
+
+### Login Credentials
+
+Default credentials:
+- **Username**: `admin`
+- **Password**: `admin123`
+
+⚠️ **Important**: Set `ADMIN_USER` and `ADMIN_PASSWORD` environment variables in production!
 
 ### Security Settings (Web UI)
 
@@ -66,6 +76,14 @@ All security features can be configured from the web interface:
 | `orOpts__commandTopic` | commands | Command topic suffix |
 | `udpServerOptions__port` | 8833 | TCP port for device connections |
 | `webApiPort` | 3000 | Web dashboard/API port |
+
+### Authentication Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ADMIN_USER` | admin | Dashboard login username |
+| `ADMIN_PASSWORD` | admin123 | Dashboard login password |
+| `JWT_SECRET` | (auto-generated) | Secret for JWT tokens |
 
 ### Security Environment Variables
 
