@@ -7,10 +7,10 @@ services:
     restart: unless-stopped
     ports:
       - "${udpServerOptions__port:-8833}:8833"
-      - "${WEB_API_PORT:-3000}:3000"
+      - "${WEB_API_PORT:-3080}:3000"
     environment:
       - NODE_ENV=${NODE_ENV:-production}
-      - WEB_API_PORT=${WEB_API_PORT:-3000}
+      - WEB_API_PORT=3000
       - WEB_API_HOST=0.0.0.0
       - mqttOptions__host=${mqttOptions__host:-localhost}
       - mqttOptions__port=${mqttOptions__port:-1883}
