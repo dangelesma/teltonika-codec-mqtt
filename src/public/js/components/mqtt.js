@@ -32,17 +32,22 @@ const MqttComponent = {
             </div>
             <div class="p-4">
               <!-- Main Status -->
-              <div id="mqtt-main-status" class="flex items-center justify-between p-4 bg-gradient-to-r from-slate-800/50 to-slate-700/30 rounded-xl border border-slate-700/50 mb-4">
-                <div class="flex items-center gap-3">
-                  <div id="mqtt-status-indicator" class="w-4 h-4 rounded-full bg-gray-500 shadow-lg"></div>
-                  <div>
-                    <div id="mqtt-status-text" class="font-semibold">Unknown</div>
-                    <div id="mqtt-broker-display" class="text-xs text-slate-500 font-mono">-</div>
+              <div id="mqtt-main-status" class="p-4 bg-gradient-to-r from-slate-800/50 to-slate-700/30 rounded-xl border border-slate-700/50 mb-4">
+                <div class="flex items-center justify-between mb-3">
+                  <div class="flex items-center gap-3">
+                    <div id="mqtt-status-indicator" class="w-3 h-3 rounded-full bg-gray-500 shadow-lg"></div>
+                    <span id="mqtt-status-text" class="font-semibold">Unknown</span>
                   </div>
+                  <button id="mqtt-reconnect-btn" class="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-600 hover:to-blue-700 rounded-xl text-sm font-medium transition-all shadow-lg shadow-cyan-500/20">
+                    Reconnect
+                  </button>
                 </div>
-                <button id="mqtt-reconnect-btn" class="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-600 hover:to-blue-700 rounded-xl text-sm font-medium transition-all shadow-lg shadow-cyan-500/20">
-                  Reconnect
-                </button>
+                <div class="flex items-center gap-2 p-2 bg-slate-900/50 rounded-lg">
+                  <svg class="w-4 h-4 text-slate-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/>
+                  </svg>
+                  <code id="mqtt-broker-display" class="text-xs text-cyan-400 font-mono break-all">-</code>
+                </div>
               </div>
               
               <!-- Stats Grid -->
@@ -409,15 +414,15 @@ const MqttComponent = {
 
     // Update status indicator
     if (status.connected) {
-      indicator.className = 'w-4 h-4 rounded-full bg-green-500 shadow-lg shadow-green-500/50 animate-pulse';
+      indicator.className = 'w-3 h-3 rounded-full bg-green-500 shadow-lg shadow-green-500/50 animate-pulse';
       text.textContent = 'Connected';
       text.className = 'font-semibold text-green-400';
-      mainStatus.className = 'flex items-center justify-between p-4 bg-gradient-to-r from-green-900/30 to-emerald-900/20 rounded-xl border border-green-500/30 mb-4';
+      mainStatus.className = 'p-4 bg-gradient-to-r from-green-900/30 to-emerald-900/20 rounded-xl border border-green-500/30 mb-4';
     } else {
-      indicator.className = 'w-4 h-4 rounded-full bg-red-500 shadow-lg shadow-red-500/50';
+      indicator.className = 'w-3 h-3 rounded-full bg-red-500 shadow-lg shadow-red-500/50';
       text.textContent = 'Disconnected';
       text.className = 'font-semibold text-red-400';
-      mainStatus.className = 'flex items-center justify-between p-4 bg-gradient-to-r from-red-900/30 to-rose-900/20 rounded-xl border border-red-500/30 mb-4';
+      mainStatus.className = 'p-4 bg-gradient-to-r from-red-900/30 to-rose-900/20 rounded-xl border border-red-500/30 mb-4';
     }
 
     // Update details
