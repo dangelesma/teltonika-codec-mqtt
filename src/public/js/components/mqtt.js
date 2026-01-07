@@ -24,23 +24,24 @@ const MqttComponent = {
           
           <!-- Connection Status Card -->
           <div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl border border-slate-700/50 shadow-xl overflow-hidden">
-            <div class="p-4 border-b border-slate-700/50 bg-slate-800/50">
+            <div class="p-4 border-b border-slate-700/50 bg-slate-800/50 flex items-center justify-between">
               <h2 class="text-lg font-bold flex items-center gap-2">
                 <span class="w-8 h-8 bg-gradient-to-br from-emerald-500 to-green-600 rounded-lg flex items-center justify-center text-sm">📡</span>
                 Connection Status
               </h2>
+              <button id="mqtt-reconnect-btn" class="px-3 py-1.5 bg-slate-700/50 hover:bg-slate-600/50 border border-slate-600/50 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                </svg>
+                Reconnect
+              </button>
             </div>
             <div class="p-4">
               <!-- Main Status -->
               <div id="mqtt-main-status" class="p-4 bg-gradient-to-r from-slate-800/50 to-slate-700/30 rounded-xl border border-slate-700/50 mb-4">
-                <div class="flex items-center justify-between mb-3">
-                  <div class="flex items-center gap-3">
-                    <div id="mqtt-status-indicator" class="w-3 h-3 rounded-full bg-gray-500 shadow-lg"></div>
-                    <span id="mqtt-status-text" class="font-semibold">Unknown</span>
-                  </div>
-                  <button id="mqtt-reconnect-btn" class="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-600 hover:to-blue-700 rounded-xl text-sm font-medium transition-all shadow-lg shadow-cyan-500/20">
-                    Reconnect
-                  </button>
+                <div class="flex items-center gap-3 mb-3">
+                  <div id="mqtt-status-indicator" class="w-3 h-3 rounded-full bg-gray-500 shadow-lg"></div>
+                  <span id="mqtt-status-text" class="font-semibold">Unknown</span>
                 </div>
                 <div class="flex items-center gap-2 p-2 bg-slate-900/50 rounded-lg">
                   <svg class="w-4 h-4 text-slate-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
