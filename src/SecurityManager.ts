@@ -95,8 +95,11 @@ class SecurityManager {
   /**
    * Get full configuration (for UI)
    */
-  getFullConfig(): SecurityConfig {
-    return { ...this.config };
+  getFullConfig(): SecurityConfig & { blockedIps: string[] } {
+    return { 
+      ...this.config,
+      blockedIps: Array.from(this.blockedIps)
+    };
   }
 
   private loadConfig(): SecurityConfig {
@@ -493,6 +496,24 @@ class SecurityManager {
    */
   getBlockedIps(): string[] {
     return Array.from(this.blockedIps);
+  }
+
+  /**
+   * Clear all blocked IPs
+   */
+  clearBlockedIps(): void {
+    this.blockedIps.clear();
+    this.connectionAttempts.clear();
+    this.logSecurityEvent('info', 'All blocked IPs cleared');
+  }
+
+  /**
+   * Regenerate API key
+   */
+  regenerateApiKey(): string {
+    this.config.apiKey = randomBytes(32).toString('hex');
+    this.logSecurityEvent('info', 'API key regenerated');
+    return this.config.apiKey;
   }
 
   /**

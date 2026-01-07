@@ -1,10 +1,11 @@
 {
   "name": "teltonika-codec-mqtt",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Teltonika Codec 8/8E to MQTT with Codec 12 bidirectional commands support",
   "main": "./out/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && npm run copy-public",
+    "copy-public": "node -e \"const fs=require('fs');const path=require('path');function copy(s,d){if(!fs.existsSync(d))fs.mkdirSync(d,{recursive:true});fs.readdirSync(s).forEach(f=>{const sp=path.join(s,f),dp=path.join(d,f);fs.statSync(sp).isDirectory()?copy(sp,dp):fs.copyFileSync(sp,dp)})};copy('src/public','out/public')\"",
     "start": "node out/index.js",
     "dev": "ts-node src/index.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
