@@ -39,10 +39,20 @@ class GPSWebhookForwarder {
             timeout: parseInt(process.env.GPS_WEBHOOK_TIMEOUT || '5000'),
         };
 
+        // Debug: log raw env values
+        console.log('[Webhook] Config loaded:', {
+            GPS_WEBHOOK_ENABLED: process.env.GPS_WEBHOOK_ENABLED,
+            GPS_WEBHOOK_URL: process.env.GPS_WEBHOOK_URL,
+            enabled: this.config.enabled,
+            url: this.config.url
+        });
+
         if (this.config.enabled && this.config.url) {
             deviceManager.log('info', 'Webhook', `GPS Webhook enabled: ${this.config.url}`);
         } else if (this.config.enabled) {
             deviceManager.log('warn', 'Webhook', 'GPS Webhook enabled but no URL configured');
+        } else {
+            deviceManager.log('info', 'Webhook', 'GPS Webhook disabled');
         }
     }
 
