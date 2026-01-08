@@ -11,9 +11,10 @@ import moment = require("moment");
 import { commandManager } from "./CommandManager";
 import { deviceManager } from "./DeviceManager";
 import { WebApiServer } from "./WebApiServer";
+import { gpsWebhook } from "./GPSWebhook";
 // import dotenv
 import * as dotenv from 'dotenv';
-let out = dotenv.config({ path: process.cwd()+'/.env' });
+let out = dotenv.config({ path: process.cwd() + '/.env' });
 
 interface orOptions {
   realm: string;
@@ -33,21 +34,21 @@ var clients: { [imei: string]: { client: MqttClient; uuid: string } } = {};
 
 var opts = {
   orOpts: {
-	realm: process.env.orOpts__realm || 'master',
-	teltonika_keyword: process.env.orOpts__teltonika_keyword || 'teltonika',
-	dataTopic: process.env.orOpts__dataTopic || 'data',
-	commandTopic: process.env.orOpts__commandTopic || 'commands',
+    realm: process.env.orOpts__realm || 'master',
+    teltonika_keyword: process.env.orOpts__teltonika_keyword || 'teltonika',
+    dataTopic: process.env.orOpts__dataTopic || 'data',
+    commandTopic: process.env.orOpts__commandTopic || 'commands',
   } as orOptions,
   mqttOptions: {
-	host: process.env.mqttOptions__host || 'localhost',
-	port: parseInt(process.env.mqttOptions__port || '1883'),
+    host: process.env.mqttOptions__host || 'localhost',
+    port: parseInt(process.env.mqttOptions__port || '1883'),
     protocol: process.env.mqttOptions__protocol || 'mqtt',
     username: process.env.mqttOptions__username || undefined,
     password: process.env.mqttOptions__password || undefined,
     rejectUnauthorized: process.env.mqttOptions__rejectUnauthorized !== 'false'
   },
   udp_options: {
-	port: parseInt(process.env.udpServerOptions__port || '8833')
+    port: parseInt(process.env.udpServerOptions__port || '8833')
   },
   webApi: {
     port: parseInt(process.env.WEB_API_PORT || '3000'),
@@ -65,7 +66,7 @@ let mqttConnectedCount = 0;
 // Set MQTT config callback for dynamic reconnection
 webApi.setMqttConfigCallback(async (newConfig) => {
   deviceManager.log('info', 'Main', 'MQTT config updated from UI, reconnecting all clients...');
-  
+
   // Update opts with new config
   opts.mqttOptions = {
     host: newConfig.host,
@@ -77,7 +78,7 @@ webApi.setMqttConfigCallback(async (newConfig) => {
   };
   opts.orOpts.realm = newConfig.realm;
   opts.orOpts.teltonika_keyword = newConfig.keyword;
-  
+
   // Reconnect all existing clients
   for (const imei of Object.keys(clients)) {
     if (clients[imei]) {
@@ -85,7 +86,7 @@ webApi.setMqttConfigCallback(async (newConfig) => {
       // Re-connection will happen automatically when device sends new data
     }
   }
-  
+
   return true;
 });
 
@@ -101,7 +102,7 @@ const server = new UdpServerManager(opts.udp_options);
 // Handle AVL data messages
 server.on("message", (imei: string, uuid: string, content: AVL_Data) => {
   deviceManager.log('debug', 'AVL', `Data from ${imei}: ${content.IOelement.ElementCount} elements`);
-  
+
   // Update device manager with position
   deviceManager.updatePosition(imei, {
     lat: content.GPSelement.Latitude,
@@ -112,14 +113,29 @@ server.on("message", (imei: string, uuid: string, content: AVL_Data) => {
     satellites: content.GPSelement.Satellites,
     timestamp: content.Timestamp
   });
-  
+
+  // Forward to GPS Sistema via HTTP webhook (runs in parallel with MQTT)
+  gpsWebhook.forwardGPSData({
+    imei,
+    latitude: content.GPSelement.Latitude,
+    longitude: content.GPSelement.Longitude,
+    speed: content.GPSelement.Speed,
+    heading: content.GPSelement.Angle,
+    altitude: content.GPSelement.Altitude,
+    timestamp: content.Timestamp,
+    satellites: content.GPSelement.Satellites,
+    metadata: content.IOelement.Elements
+  }).catch(err => {
+    deviceManager.log('error', 'Webhook', `Failed to forward GPS data: ${err.message}`);
+  });
+
   var mqttMsg = processAvlData(content);
-  
+
   if (!clients[imei] || !clients[imei].client.connected) {
     deviceManager.log('warn', 'MQTT', `Not connected to broker for ${imei}`);
     return;
   }
-  
+
   clients[imei].client.publish(
     dataTopic(opts.orOpts, uuid, imei),
     JSON.stringify(mqttMsg)
@@ -130,7 +146,7 @@ server.on("message", (imei: string, uuid: string, content: AVL_Data) => {
 // Handle command responses (Codec 12)
 server.on("commandResponse", (imei: string, uuid: string, response: string) => {
   deviceManager.log('info', 'Codec12', `Response from ${imei}: ${response}`);
-  
+
   if (clients[imei] && clients[imei].client.connected) {
     const responseMsg = {
       state: {
@@ -152,22 +168,22 @@ server.on("commandResponse", (imei: string, uuid: string, response: string) => {
 server.on("connected", (imei: string, uuid: string) => {
   deviceManager.log('info', 'Device', `Connected: ${imei}`);
   deviceManager.registerDevice(imei, uuid);
-  
+
   const clientOptions: IClientOptions = opts.mqttOptions as IClientOptions;
   clientOptions["clientId"] = `teltonika_${imei}_${Date.now()}`;
   const client: MqttClient = connect(clientOptions as IClientOptions);
-  
+
   client.on('connect', () => {
     deviceManager.log('info', 'MQTT', `Connected for device ${imei}`);
     mqttConnectedCount++;
-    
+
     // Update WebAPI with MQTT status
     webApi.updateMqttStatus({
       connected: true,
       broker: `${opts.mqttOptions.protocol}://${opts.mqttOptions.host}:${opts.mqttOptions.port}`,
       lastConnected: new Date()
     });
-    
+
     // Subscribe to command topic for this device
     const cmdTopic = commandTopic(opts.orOpts, uuid, imei);
     client.subscribe(cmdTopic, (err) => {
@@ -177,24 +193,24 @@ server.on("connected", (imei: string, uuid: string) => {
         deviceManager.log('info', 'MQTT', `Subscribed to: ${cmdTopic}`);
       }
     });
-    
+
     // Subscribe to data topic
     client.subscribe(dataTopic(opts.orOpts, uuid, imei));
   });
-  
+
   // Handle incoming MQTT messages (commands)
   client.on('message', async (topic: string, message: Buffer) => {
     const cmdTopic = commandTopic(opts.orOpts, uuid, imei);
-    
+
     if (topic === cmdTopic) {
       const command = message.toString().trim();
       deviceManager.log('info', 'MQTT', `Command for ${imei}: "${command}"`);
-      
+
       if (command && command.length > 0) {
         try {
           // Send command via Codec 12
           const response = await commandManager.sendCommand(imei, command);
-          
+
           if (response.success) {
             deviceManager.log('info', 'Codec12', `Command success for ${imei}: ${response.response}`);
           } else {
@@ -218,14 +234,14 @@ server.on("connected", (imei: string, uuid: string) => {
       }
     }
   });
-  
+
   client.on('error', (err) => {
     deviceManager.log('error', 'MQTT', `Error for device ${imei}`, err);
     webApi.updateMqttStatus({
       lastError: err.message
     });
   });
-  
+
   client.on('close', () => {
     mqttConnectedCount = Math.max(0, mqttConnectedCount - 1);
     if (mqttConnectedCount === 0) {
@@ -234,19 +250,19 @@ server.on("connected", (imei: string, uuid: string) => {
       });
     }
   });
-  
+
   clients[imei] = { client: client, uuid: uuid };
 });
 
 server.on("disconnected", (imei: string) => {
   deviceManager.log('info', 'Device', `Disconnected: ${imei}`);
   deviceManager.unregisterDevice(imei);
-  
+
   if (clients[imei]) {
     clients[imei].client.end();
     delete clients[imei];
     mqttConnectedCount = Math.max(0, mqttConnectedCount - 1);
-    
+
     if (mqttConnectedCount === 0) {
       webApi.updateMqttStatus({
         connected: false
