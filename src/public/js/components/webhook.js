@@ -3,22 +3,22 @@
  */
 
 const WebhookComponent = {
-    container: null,
-    config: {
-        enabled: false,
-        url: '',
-        queueSize: 0,
-        failureCount: 0
-    },
+  container: null,
+  config: {
+    enabled: false,
+    url: '',
+    queueSize: 0,
+    failureCount: 0
+  },
 
-    init(container) {
-        this.container = container;
-        this.render();
-        this.loadConfig();
-    },
+  init(container) {
+    this.container = container;
+    this.render();
+    this.loadConfig();
+  },
 
-    render() {
-        this.container.innerHTML = `
+  render() {
+    this.container.innerHTML = `
       <div class="space-y-6">
         <!-- Header -->
         <div class="flex justify-between items-center">
@@ -121,114 +121,120 @@ const WebhookComponent = {
       </div>
     `;
 
-        this.bindEvents();
-    },
+    this.bindEvents();
+  },
 
-    bindEvents() {
-        const form = document.getElementById('webhook-form');
-        const testBtn = document.getElementById('test-webhook-btn');
+  bindEvents() {
+    const form = document.getElementById('webhook-form');
+    const testBtn = document.getElementById('test-webhook-btn');
 
-        form.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            await this.saveConfig();
-        });
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      await this.saveConfig();
+    });
 
-        testBtn.addEventListener('click', async () => {
-            await this.testWebhook();
-        });
-    },
+    testBtn.addEventListener('click', async () => {
+      await this.testWebhook();
+    });
+  },
 
-    async loadConfig() {
-        try {
-            const response = await api.get('/webhook/gps');
-            if (response.success) {
-                this.config = response.config;
-                this.updateUI();
-            }
-        } catch (error) {
-            console.error('Failed to load webhook config:', error);
-            showToast('Failed to load webhook configuration', 'error');
-        }
-    },
-
-    updateUI() {
-        document.getElementById('webhook-enabled').checked = this.config.enabled;
-        document.getElementById('webhook-url').value = this.config.url || '';
-        document.getElementById('queue-size').textContent = this.config.queueSize || 0;
-        document.getElementById('failure-count').textContent = this.config.failureCount || 0;
-
-        const indicator = document.getElementById('webhook-indicator');
-        const statusText = document.getElementById('webhook-status-text');
-
-        if (this.config.enabled && this.config.url) {
-            indicator.className = 'w-3 h-3 rounded-full bg-green-500';
-            statusText.textContent = 'Active';
-            statusText.className = 'text-sm text-green-400';
-        } else if (this.config.enabled) {
-            indicator.className = 'w-3 h-3 rounded-full bg-yellow-500';
-            statusText.textContent = 'No URL';
-            statusText.className = 'text-sm text-yellow-400';
-        } else {
-            indicator.className = 'w-3 h-3 rounded-full bg-gray-500';
-            statusText.textContent = 'Disabled';
-            statusText.className = 'text-sm text-slate-400';
-        }
-    },
-
-    async saveConfig() {
-        const enabled = document.getElementById('webhook-enabled').checked;
-        const url = document.getElementById('webhook-url').value;
-        const apiKey = document.getElementById('webhook-apikey').value;
-        const timeout = parseInt(document.getElementById('webhook-timeout').value) || 5000;
-
-        try {
-            const response = await api.post('/webhook/gps', {
-                enabled,
-                url,
-                apiKey,
-                timeout
-            });
-
-            if (response.success) {
-                this.config = response.config;
-                this.updateUI();
-                showToast('Webhook configuration saved!', 'success');
-            } else {
-                showToast('Failed to save configuration', 'error');
-            }
-        } catch (error) {
-            console.error('Failed to save webhook config:', error);
-            showToast('Failed to save configuration', 'error');
-        }
-    },
-
-    async testWebhook() {
-        const testBtn = document.getElementById('test-webhook-btn');
-        testBtn.disabled = true;
-        testBtn.textContent = '⏳ Testing...';
-
-        try {
-            const response = await api.post('/webhook/gps/test', {});
-
-            if (response.success) {
-                showToast('Test data sent successfully!', 'success');
-            } else {
-                showToast(response.message || 'Test failed', 'warning');
-            }
-        } catch (error) {
-            console.error('Webhook test failed:', error);
-            showToast('Test failed: ' + error.message, 'error');
-        } finally {
-            testBtn.disabled = false;
-            testBtn.textContent = '🧪 Test';
-        }
-    },
-
-    // Called from websocket when config updates
-    handleConfigUpdate(config) {
-        this.config = config;
+  async loadConfig() {
+    try {
+      const response = await Utils.apiRequest('/api/webhook/gps');
+      if (response.success) {
+        this.config = response.config;
         this.updateUI();
+      }
+    } catch (error) {
+      console.error('Failed to load webhook config:', error);
+      Utils.showToast('Failed to load webhook configuration', 'error');
     }
+  },
+
+  updateUI() {
+    document.getElementById('webhook-enabled').checked = this.config.enabled;
+    document.getElementById('webhook-url').value = this.config.url || '';
+    document.getElementById('queue-size').textContent = this.config.queueSize || 0;
+    document.getElementById('failure-count').textContent = this.config.failureCount || 0;
+
+    const indicator = document.getElementById('webhook-indicator');
+    const statusText = document.getElementById('webhook-status-text');
+
+    if (this.config.enabled && this.config.url) {
+      indicator.className = 'w-3 h-3 rounded-full bg-green-500';
+      statusText.textContent = 'Active';
+      statusText.className = 'text-sm text-green-400';
+    } else if (this.config.enabled) {
+      indicator.className = 'w-3 h-3 rounded-full bg-yellow-500';
+      statusText.textContent = 'No URL';
+      statusText.className = 'text-sm text-yellow-400';
+    } else {
+      indicator.className = 'w-3 h-3 rounded-full bg-gray-500';
+      statusText.textContent = 'Disabled';
+      statusText.className = 'text-sm text-slate-400';
+    }
+  },
+
+  async saveConfig() {
+    const enabled = document.getElementById('webhook-enabled').checked;
+    const url = document.getElementById('webhook-url').value;
+    const apiKey = document.getElementById('webhook-apikey').value;
+    const timeout = parseInt(document.getElementById('webhook-timeout').value) || 5000;
+
+    try {
+      const response = await Utils.apiRequest('/api/webhook/gps', {
+        method: 'POST',
+        body: JSON.stringify({
+          enabled,
+          url,
+          apiKey,
+          timeout
+        })
+      });
+
+      if (response.success) {
+        this.config = response.config;
+        this.updateUI();
+        Utils.showToast('Webhook configuration saved!', 'success');
+      } else {
+        Utils.showToast('Failed to save configuration', 'error');
+      }
+    } catch (error) {
+      console.error('Failed to save webhook config:', error);
+      Utils.showToast('Failed to save configuration', 'error');
+    }
+  },
+
+  async testWebhook() {
+    const testBtn = document.getElementById('test-webhook-btn');
+    testBtn.disabled = true;
+    testBtn.textContent = '⏳ Testing...';
+
+    try {
+      const response = await Utils.apiRequest('/api/webhook/gps/test', {
+        method: 'POST',
+        body: JSON.stringify({})
+      });
+
+      if (response.success) {
+        Utils.showToast('Test data sent successfully!', 'success');
+      } else {
+        Utils.showToast(response.message || 'Test failed', 'warning');
+      }
+    } catch (error) {
+      console.error('Webhook test failed:', error);
+      Utils.showToast('Test failed: ' + error.message, 'error');
+    } finally {
+      testBtn.disabled = false;
+      testBtn.textContent = '🧪 Test';
+    }
+  },
+
+  // Called from websocket when config updates
+  handleConfigUpdate(config) {
+    this.config = config;
+    this.updateUI();
+  }
 };
 
 // Register component
