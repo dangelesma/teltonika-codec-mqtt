@@ -8,6 +8,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { deviceManager, DeviceInfo, LogEntry } from './DeviceManager';
 import { commandManager } from './CommandManager';
 import { securityManager } from './SecurityManager';
+import { gpsWebhook } from './GPSWebhook';
 import { randomUUID } from 'crypto';
 import * as jwt from 'jsonwebtoken';
 import * as fs from 'fs';
@@ -52,11 +53,11 @@ export class WebApiServer {
   private wss: WebSocketServer;
   private config: ApiConfig;
   private wsClients: Map<WebSocket, AuthenticatedWsClient> = new Map();
-  
+
   private readonly jwtSecret: string;
   private readonly adminUser: string;
   private readonly adminPass: string;
-  
+
   private mqttConfig: MqttConfig;
   private mqttStatus: MqttStatus;
   private onMqttConfigChange?: MqttConfigCallback;
@@ -65,11 +66,11 @@ export class WebApiServer {
     this.config = config;
     this.httpServer = createServer(this.handleRequest.bind(this));
     this.wss = new WebSocketServer({ server: this.httpServer });
-    
+
     this.jwtSecret = process.env.JWT_SECRET || randomUUID();
     this.adminUser = process.env.ADMIN_USER || 'admin';
     this.adminPass = process.env.ADMIN_PASSWORD || 'admin123';
-    
+
     // Initialize MQTT config from ENV
     this.mqttConfig = {
       protocol: process.env.mqttOptions__protocol || 'mqtt',
@@ -81,13 +82,13 @@ export class WebApiServer {
       realm: process.env.orOpts__realm || 'master',
       keyword: process.env.orOpts__teltonika_keyword || 'teltonika'
     };
-    
+
     this.mqttStatus = {
       connected: false,
       broker: `${this.mqttConfig.protocol}://${this.mqttConfig.host}:${this.mqttConfig.port}`,
       messagesPublished: 0
     };
-    
+
     this.setupWebSocket();
     this.setupDeviceEvents();
   }
@@ -154,7 +155,7 @@ export class WebApiServer {
         const decoded = jwt.verify(msg.token, this.jwtSecret) as any;
         client.authenticated = true;
         client.userId = decoded.user;
-        
+
         ws.send(JSON.stringify({ type: 'authSuccess', user: decoded.user }));
         ws.send(JSON.stringify({
           type: 'init',
@@ -179,54 +180,54 @@ export class WebApiServer {
       case 'sendCommand':
         await this.handleSendCommand(ws, msg);
         break;
-        
+
       case 'addToWhitelist':
         securityManager.addImeiToWhitelist(msg.imei);
         this.broadcastAuthenticated({ type: 'whitelistUpdated', whitelist: securityManager.getImeiWhitelist() });
         break;
-        
+
       case 'removeFromWhitelist':
         securityManager.removeImeiFromWhitelist(msg.imei);
         this.broadcastAuthenticated({ type: 'whitelistUpdated', whitelist: securityManager.getImeiWhitelist() });
         break;
-        
+
       case 'getLogs':
         ws.send(JSON.stringify({ type: 'logs', data: deviceManager.getLogs(msg.limit || 100, msg.level) }));
         break;
-        
+
       case 'clearLogs':
         deviceManager.clearLogs();
         this.broadcastAuthenticated({ type: 'logsCleared' });
         break;
-        
+
       case 'getSecurityConfig':
         ws.send(JSON.stringify({ type: 'securityConfigUpdated', data: this.getSafeSecurityConfig() }));
         break;
-        
+
       case 'updateSecurityConfig':
         securityManager.updateConfig(msg.config);
         this.broadcastAuthenticated({ type: 'securityConfigUpdated', data: this.getSafeSecurityConfig() });
         break;
-        
+
       case 'regenerateApiKey':
         securityManager.regenerateApiKey();
         this.broadcastAuthenticated({ type: 'securityConfigUpdated', data: this.getSafeSecurityConfig() });
         break;
-        
+
       case 'clearBlockedIps':
         securityManager.clearBlockedIps();
         this.broadcastAuthenticated({ type: 'securityConfigUpdated', data: this.getSafeSecurityConfig() });
         break;
-        
+
       case 'unblockIp':
         securityManager.unblockIp(msg.ip);
         this.broadcastAuthenticated({ type: 'securityConfigUpdated', data: this.getSafeSecurityConfig() });
         break;
-        
+
       case 'getMqttStatus':
         ws.send(JSON.stringify({ type: 'mqttStatus', data: this.mqttStatus }));
         break;
-        
+
       case 'mqttReconnect':
         if (this.onMqttConfigChange) {
           await this.onMqttConfigChange(this.mqttConfig);
@@ -237,7 +238,7 @@ export class WebApiServer {
 
   private async handleSendCommand(ws: WebSocket, msg: any): Promise<void> {
     const { imei, command, commandId } = msg;
-    
+
     if (!imei || !command) {
       ws.send(JSON.stringify({ type: 'commandError', commandId, error: 'IMEI and command required' }));
       return;
@@ -248,11 +249,11 @@ export class WebApiServer {
     try {
       const cmdEntry = deviceManager.addCommand(imei, commandId || Date.now().toString(), command);
       const response = await commandManager.sendCommand(imei, command);
-      
+
       if (cmdEntry) {
         deviceManager.updateCommandResponse(imei, cmdEntry.id, response.response || '', response.success, response.error);
       }
-      
+
       ws.send(JSON.stringify({
         type: 'commandResponse', commandId, imei, command,
         success: response.success, response: response.response, error: response.error
@@ -269,8 +270,8 @@ export class WebApiServer {
 
   private getSafeSecurityConfig(): any {
     const config = securityManager.getFullConfig();
-    return { 
-      ...config, 
+    return {
+      ...config,
       apiKey: config.apiKeyEnabled ? (config.apiKey || '').substring(0, 8) + '...' : '',
       blockedIps: Array.from(config.blockedIps || [])
     };
@@ -317,11 +318,11 @@ export class WebApiServer {
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
-    
+
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    
+
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
@@ -352,7 +353,7 @@ export class WebApiServer {
       if (url.pathname === '/api/auth/login' && req.method === 'POST') {
         const body = await this.readBody(req);
         const { username, password } = JSON.parse(body);
-        
+
         if (username === this.adminUser && password === this.adminPass) {
           const token = jwt.sign({ user: username }, this.jwtSecret, { expiresIn: '24h' });
           sendJson({ success: true, token, user: username });
@@ -394,8 +395,8 @@ export class WebApiServer {
       // MQTT Config
       if (url.pathname === '/api/mqtt/config') {
         if (req.method === 'GET') {
-          sendJson({ 
-            success: true, 
+          sendJson({
+            success: true,
             config: {
               ...this.mqttConfig,
               password: this.mqttConfig.password ? '********' : ''
@@ -404,7 +405,7 @@ export class WebApiServer {
         } else if (req.method === 'POST') {
           const body = await this.readBody(req);
           const newConfig = JSON.parse(body);
-          
+
           // Update config
           this.mqttConfig = {
             protocol: newConfig.protocol || this.mqttConfig.protocol,
@@ -416,9 +417,9 @@ export class WebApiServer {
             realm: newConfig.realm || this.mqttConfig.realm,
             keyword: newConfig.keyword || this.mqttConfig.keyword
           };
-          
+
           this.mqttStatus.broker = `${this.mqttConfig.protocol}://${this.mqttConfig.host}:${this.mqttConfig.port}`;
-          
+
           // Notify main app to reconnect
           if (this.onMqttConfigChange) {
             const success = await this.onMqttConfigChange(this.mqttConfig);
@@ -426,7 +427,7 @@ export class WebApiServer {
           } else {
             sendJson({ success: true, message: 'Configuration saved (reconnect manually)' });
           }
-          
+
           this.broadcastAuthenticated({ type: 'mqttConfigUpdated', data: { success: true } });
         }
         return;
@@ -436,7 +437,7 @@ export class WebApiServer {
       if (url.pathname === '/api/mqtt/test' && req.method === 'POST') {
         const body = await this.readBody(req);
         const testConfig = JSON.parse(body);
-        
+
         // TODO: Implement actual connection test
         sendJson({ success: true, message: 'Connection test not implemented yet' });
         return;
@@ -455,6 +456,60 @@ export class WebApiServer {
         return;
       }
 
+      // GPS Webhook Configuration
+      if (url.pathname === '/api/webhook/gps') {
+        if (req.method === 'GET') {
+          sendJson({
+            success: true,
+            config: gpsWebhook.getStatus()
+          });
+        } else if (req.method === 'POST') {
+          const body = await this.readBody(req);
+          const newConfig = JSON.parse(body);
+
+          gpsWebhook.updateConfig({
+            url: newConfig.url,
+            apiKey: newConfig.apiKey,
+            enabled: newConfig.enabled,
+            timeout: newConfig.timeout || 5000
+          });
+
+          sendJson({
+            success: true,
+            message: 'GPS Webhook configuration updated',
+            config: gpsWebhook.getStatus()
+          });
+
+          this.broadcastAuthenticated({ type: 'webhookConfigUpdated', data: gpsWebhook.getStatus() });
+        }
+        return;
+      }
+
+      // GPS Webhook Test
+      if (url.pathname === '/api/webhook/gps/test' && req.method === 'POST') {
+        const testData = {
+          imei: 'test-device',
+          latitude: -12.0464,
+          longitude: -77.0428,
+          speed: 0,
+          heading: 0,
+          altitude: 150,
+          timestamp: new Date(),
+          satellites: 10
+        };
+
+        try {
+          const result = await gpsWebhook.forwardGPSData(testData);
+          sendJson({
+            success: result,
+            message: result ? 'Test data sent successfully' : 'Webhook disabled or no URL configured'
+          });
+        } catch (error: any) {
+          sendJson({ success: false, error: error.message }, 500);
+        }
+        return;
+      }
+
       sendJson({ success: false, error: 'Not found' }, 404);
     } catch (error: any) {
       console.error('API Error:', error);
@@ -467,7 +522,7 @@ export class WebApiServer {
     if (!authHeader?.startsWith('Bearer ')) {
       return { valid: false, error: 'No token provided' };
     }
-    
+
     try {
       const decoded = jwt.verify(authHeader.substring(7), this.jwtSecret) as any;
       return { valid: true, user: decoded.user };
@@ -489,11 +544,11 @@ export class WebApiServer {
     // Determine file path
     let filePath = url.pathname;
     if (filePath === '/') filePath = '/index.html';
-    
+
     // Resolve to public directory
     const publicDir = path.join(__dirname, 'public');
     const fullPath = path.join(publicDir, filePath);
-    
+
     // Security: prevent directory traversal
     if (!fullPath.startsWith(publicDir)) {
       res.writeHead(403);
@@ -514,7 +569,7 @@ export class WebApiServer {
       '.svg': 'image/svg+xml',
       '.ico': 'image/x-icon'
     };
-    
+
     const contentType = contentTypes[ext] || 'application/octet-stream';
 
     // Try to read and serve the file
@@ -530,7 +585,7 @@ export class WebApiServer {
         return;
       }
 
-      res.writeHead(200, { 
+      res.writeHead(200, {
         'Content-Type': contentType,
         'Cache-Control': ext === '.html' ? 'no-cache' : 'max-age=3600'
       });
