@@ -45,6 +45,11 @@ const App = {
       case 'mqtt':
         WS.send({ type: 'getMqttStatus' });
         break;
+      case 'webhook':
+        if (typeof WebhookComponent !== 'undefined') {
+          WebhookComponent.loadConfig();
+        }
+        break;
     }
   },
 
@@ -88,12 +93,12 @@ const App = {
   updateAllViews() {
     MapComponent.renderDeviceList(this.devices);
     DevicesComponent.renderList(this.devices);
-    
+
     // Update selected device if any
     if (DevicesComponent.selectedImei && this.devices[DevicesComponent.selectedImei]) {
       DevicesComponent.renderDetails(this.devices[DevicesComponent.selectedImei]);
     }
-    
+
     // Update security connected devices
     if (typeof SecurityComponent !== 'undefined' && SecurityComponent.renderConnectedDevices) {
       SecurityComponent.renderConnectedDevices();

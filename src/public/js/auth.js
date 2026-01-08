@@ -9,7 +9,7 @@ const Auth = {
     this.token = localStorage.getItem('token');
     this.setupLoginForm();
     document.getElementById('logout-btn').addEventListener('click', () => this.logout());
-    
+
     if (this.token) {
       this.verifyToken();
     }
@@ -20,13 +20,13 @@ const Auth = {
       e.preventDefault();
       const user = document.getElementById('login-user').value;
       const pass = document.getElementById('login-pass').value;
-      
+
       try {
         const data = await Utils.apiRequest('/api/auth/login', {
           method: 'POST',
           body: JSON.stringify({ username: user, password: pass })
         });
-        
+
         if (data.success) {
           this.token = data.token;
           localStorage.setItem('token', this.token);
@@ -56,14 +56,15 @@ const Auth = {
   showDashboard() {
     document.getElementById('login-screen').classList.add('hidden');
     document.getElementById('dashboard').classList.remove('hidden');
-    
+
     // Initialize components
     MapComponent.init();
     DevicesComponent.init();
     MqttComponent.init();
+    WebhookComponent.init(document.getElementById('tab-webhook'));
     SecurityComponent.init();
     LogsComponent.init();
-    
+
     // Connect WebSocket
     WS.connect();
   },
